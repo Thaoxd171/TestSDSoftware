@@ -18,6 +18,8 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
 
         public int Schedules { get; set; }
 
+        public int Tags { get; set; }
+
         public GenerationStatus Status { get; set; }
 
         public string Message { get; set; }

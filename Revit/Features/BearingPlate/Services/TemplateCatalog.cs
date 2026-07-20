@@ -46,6 +46,16 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 .Cast<FamilySymbol>()
                 .OrderBy(t => t.Name)
                 .ToList();
+
+            // The parts of a plate are data devices, so their tags live in the data device tag category.
+            TagTypes = new FilteredElementCollector(document)
+                .OfCategory(BuiltInCategory.OST_DataDeviceTags)
+                .WhereElementIsElementType()
+                .Cast<FamilySymbol>()
+                .OrderBy(t => t.Name)
+                .ToList();
+
+            TextTypes = document.OfClass<TextNoteType>().OrderBy(t => t.Name).ToList();
         }
 
         public List<ViewSchedule> ScheduleTemplates { get; }
@@ -55,6 +65,18 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         public List<View> ThreeDTemplates { get; }
 
         public List<FamilySymbol> TitleBlocks { get; }
+
+        public List<FamilySymbol> TagTypes { get; }
+
+        public List<TextNoteType> TextTypes { get; }
+
+        /// <summary>Tag used on the parts of a plate.</summary>
+        public FamilySymbol ComponentTagType =>
+            TagTypes.FirstOrDefault(t => Contains(t.Name, "Bearing Plate")) ?? TagTypes.FirstOrDefault();
+
+        /// <summary>Text style the reference drawings use for the "Plan" and "Front" labels.</summary>
+        public TextNoteType LabelTextType =>
+            TextTypes.FirstOrDefault(t => Contains(t.Name, "2.5mm")) ?? TextTypes.FirstOrDefault();
 
         /// <summary>Preferred plan template: the REVGEN one, otherwise anything mentioning "plan".</summary>
         public View DefaultPlanTemplate => Prefer(DetailTemplates, ViewPrefix + " Plan", "plan");

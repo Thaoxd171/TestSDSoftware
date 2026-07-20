@@ -27,6 +27,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
 
         public bool CreateThreeD { get; set; } = true;
 
+        /// <summary>Tag the parts of each plate and write the view labels.</summary>
+        public bool CreateTags { get; set; } = true;
+
         public string SheetNumberFor(string assemblyName)
         {
             return (SheetNumberPattern ?? string.Empty).Replace(AssemblyToken, assemblyName);
