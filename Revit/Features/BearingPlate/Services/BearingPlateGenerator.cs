@@ -30,6 +30,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         private readonly SheetBuilder _sheets;
         private readonly ComponentCollector _components;
         private readonly TagService _tags;
+        private readonly DimensionService _dimensions;
 
         public BearingPlateGenerator(Document document, TemplateCatalog catalog)
         {
@@ -41,6 +42,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             _sheets = new SheetBuilder(document);
             _components = new ComponentCollector(document);
             _tags = new TagService(document);
+            _dimensions = new DimensionService(document);
         }
 
         public List<GenerationResult> Run(IList<PlateItem> plates, BearingPlateOptions options, IProgressSink progress)
@@ -184,7 +186,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                     drawing.Front = _views.CreateFront(assemblyId, IdOf(frontTemplate));
                     drawing.ThreeD = options.CreateThreeD ? _views.CreateThreeD(assemblyId, IdOf(threeDTemplate)) : null;
 
-                    var report = options.CreateTags ? Annotate(drawing) : string.Empty;
+                    var report = Annotate(drawing, options);
 
                     transaction.Commit();
                     progress.Log($"{plate.Name}: {drawing.ViewCount} view(s){report}");
@@ -203,30 +205,52 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             }
         }
 
-        /// <summary>Tags both detail views and returns a line describing what happened.</summary>
-        private string Annotate(PlateDrawing drawing)
+        /// <summary>Annotates both detail views and returns a line describing what happened.</summary>
+        private string Annotate(PlateDrawing drawing, BearingPlateOptions options)
         {
-            var components = _components.Collect(drawing.Plate.Assembly);
-            if (components.Count == 0)
-            {
-                return ", no parts to tag";
-            }
-
-            var tagType = _catalog.ComponentTagType;
-            var labelType = _catalog.LabelTextType;
             var plate = drawing.Plate.Plate;
 
-            // the tags have to exist before the views are put on paper: a viewport is sized by
+            // annotation has to be finished before the views go on paper: a viewport is sized by
             // everything visible in its view, annotation included
             _document.Regenerate();
 
-            var plan = _tags.AnnotatePlan(drawing.Plan, plate, components, tagType, labelType);
-            var front = _tags.AnnotateFront(drawing.Front, plate, components, tagType, labelType);
+            var report = string.Empty;
 
-            drawing.Tags = plan.Placed + front.Placed;
-            return $", {components.Count} part kind(s), " +
-                   $"{plan.Describe(AssemblyViewBuilder.PlanName)}, " +
-                   $"{front.Describe(AssemblyViewBuilder.FrontName)}";
+            if (options.CreateTags)
+            {
+                var tagPlan = new AnnotationResult();
+                var tagFront = new AnnotationResult();
+                var components = _components.Collect(drawing.Plate.Assembly);
+
+                if (components.Count == 0)
+                {
+                    tagPlan.Note("no parts to tag");
+                }
+                else
+                {
+                    var tagType = _catalog.ComponentTagType;
+                    var labelType = _catalog.LabelTextType;
+                    tagPlan.Add(_tags.AnnotatePlan(drawing.Plan, plate, components, tagType, labelType));
+                    tagFront.Add(_tags.AnnotateFront(drawing.Front, plate, components, tagType, labelType));
+                }
+
+                drawing.Tags = tagPlan.Placed + tagFront.Placed;
+                report += $", tags {tagPlan.Describe(AssemblyViewBuilder.PlanName)} " +
+                          $"{tagFront.Describe(AssemblyViewBuilder.FrontName)}";
+            }
+
+            if (options.CreateDimensions)
+            {
+                var type = _catalog.LinearDimensionType;
+                var dimPlan = _dimensions.DimensionPlan(drawing.Plan, plate, type);
+                var dimFront = _dimensions.DimensionFront(drawing.Front, plate, type);
+
+                drawing.Dimensions = dimPlan.Placed + dimFront.Placed;
+                report += $", dims {dimPlan.Describe(AssemblyViewBuilder.PlanName)} " +
+                          $"{dimFront.Describe(AssemblyViewBuilder.FrontName)}";
+            }
+
+            return report;
         }
 
         // ------------------------------------------------------------------ pass 3
@@ -349,6 +373,8 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
 
             public int Tags { get; set; }
 
+            public int Dimensions { get; set; }
+
             /// <summary>Null while the plate is still being worked on.</summary>
             public GenerationResult Result { get; set; }
 
@@ -360,6 +386,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 Front = null;
                 ThreeD = null;
                 Tags = 0;
+                Dimensions = 0;
             }
         }
     }

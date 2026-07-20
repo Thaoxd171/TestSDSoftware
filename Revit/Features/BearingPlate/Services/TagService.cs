@@ -37,9 +37,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         /// Plan is drawn looking down, so both clusters run in the XY plane: one above the plate
         /// stepping left, one below it stepping down.
         /// </summary>
-        public TagResult AnnotatePlan(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
+        public AnnotationResult AnnotatePlan(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
         {
-            var result = new TagResult();
+            var result = new AnnotationResult();
 
             var box = plate.get_BoundingBox(null);
             if (box == null)
@@ -73,9 +73,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         /// Front is drawn looking along -Y, so the clusters run in the XZ plane: one to the left of
         /// the plate stepping left, one to its right stepping up.
         /// </summary>
-        public TagResult AnnotateFront(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
+        public AnnotationResult AnnotateFront(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
         {
-            var result = new TagResult();
+            var result = new AnnotationResult();
 
             var box = plate.get_BoundingBox(null);
             if (box == null)
@@ -106,7 +106,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         }
 
         private void PlaceCluster(
-            TagResult result,
+            AnnotationResult result,
             View view,
             FamilySymbol tagType,
             IList<PlateComponent> components,
@@ -170,7 +170,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         /// The label is the short drawing name - "Plan", "Front" - not the view's own name, which
         /// Revit may have had to qualify to keep unique.
         /// </summary>
-        private void PlaceLabel(TagResult result, View view, TextNoteType labelType, XYZ point, string label)
+        private void PlaceLabel(AnnotationResult result, View view, TextNoteType labelType, XYZ point, string label)
         {
             if (labelType == null)
             {

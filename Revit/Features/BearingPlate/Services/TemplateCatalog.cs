@@ -56,6 +56,11 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 .ToList();
 
             TextTypes = document.OfClass<TextNoteType>().OrderBy(t => t.Name).ToList();
+
+            DimensionTypes = document.OfClass<DimensionType>()
+                .Where(t => !string.IsNullOrEmpty(t.Name))
+                .OrderBy(t => t.Name)
+                .ToList();
         }
 
         public List<ViewSchedule> ScheduleTemplates { get; }
@@ -77,6 +82,15 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         /// <summary>Text style the reference drawings use for the "Plan" and "Front" labels.</summary>
         public TextNoteType LabelTextType =>
             TextTypes.FirstOrDefault(t => Contains(t.Name, "2.5mm")) ?? TextTypes.FirstOrDefault();
+
+        public List<DimensionType> DimensionTypes { get; }
+
+        /// <summary>Linear style the reference drawings dimension with.</summary>
+        public DimensionType LinearDimensionType =>
+            Linear().FirstOrDefault(t => Contains(t.Name, "2.5mm")) ?? Linear().FirstOrDefault();
+
+        private IEnumerable<DimensionType> Linear() =>
+            DimensionTypes.Where(t => t.StyleType == DimensionStyleType.Linear);
 
         /// <summary>Preferred plan template: the REVGEN one, otherwise anything mentioning "plan".</summary>
         public View DefaultPlanTemplate => Prefer(DetailTemplates, ViewPrefix + " Plan", "plan");

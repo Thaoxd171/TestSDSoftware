@@ -4,11 +4,11 @@ using System.Linq;
 namespace SDSoftware.RevitTest.Features.BearingPlate.Models
 {
     /// <summary>
-    /// Outcome of annotating one view. Tagging fails for ordinary reasons - a part hidden by the
-    /// view template, a point Revit will not accept - so the reasons are collected and reported
-    /// instead of being swallowed.
+    /// Outcome of annotating one view, whether with tags or dimensions. Annotation fails for
+    /// ordinary reasons - a part hidden by the view template, a face Revit will not dimension to -
+    /// so the reasons are collected and reported instead of being swallowed.
     /// </summary>
-    public class TagResult
+    public class AnnotationResult
     {
         private readonly List<string> _notes = new List<string>();
 
@@ -40,7 +40,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
             }
         }
 
-        public void Add(TagResult other)
+        public void Add(AnnotationResult other)
         {
             Placed += other.Placed;
             Failed += other.Failed;
@@ -51,12 +51,12 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
             }
         }
 
-        public string Describe(string viewName)
+        public string Describe(string label)
         {
-            var text = $"{viewName} {Placed} tag(s)";
+            var text = $"{label} {Placed}";
             if (Failed > 0)
             {
-                text += $", {Failed} failed";
+                text += $" ({Failed} failed)";
             }
 
             return _notes.Count == 0 ? text : $"{text} [{string.Join("; ", _notes)}]";
