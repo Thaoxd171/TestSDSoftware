@@ -12,8 +12,20 @@ namespace SDSoftware.RevitTest.Core
     {
         public static bool? ShowDialog(Window window, UIApplication application)
         {
-            new WindowInteropHelper(window) { Owner = application.MainWindowHandle };
+            Own(window, application);
             return window.ShowDialog();
+        }
+
+        /// <summary>Shows a window without blocking - used for progress while the command runs.</summary>
+        public static void Show(Window window, UIApplication application)
+        {
+            Own(window, application);
+            window.Show();
+        }
+
+        private static void Own(Window window, UIApplication application)
+        {
+            new WindowInteropHelper(window) { Owner = application.MainWindowHandle };
         }
     }
 }

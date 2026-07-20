@@ -1,0 +1,54 @@
+<Window x:Class="SDSoftware.RevitTest.Core.Progress.ProgressWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="SD Revit Test"
+        Height="420"
+        Width="780"
+        MinHeight="300"
+        MinWidth="520"
+        FontFamily="Segoe UI"
+        FontSize="12"
+        ShowInTaskbar="False"
+        WindowStartupLocation="CenterScreen">
+	<Grid Margin="12">
+		<Grid.RowDefinitions>
+			<RowDefinition Height="Auto" />
+			<RowDefinition Height="*" />
+			<RowDefinition Height="140" />
+		</Grid.RowDefinitions>
+
+		<StackPanel Grid.Row="0" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,0,0,10">
+			<Button x:Name="StopButton" Content="Stop" Width="60" Height="24" Margin="0,0,6,0" Click="OnStopClick" />
+			<Button Content="Copy" Width="60" Height="24" Click="OnCopyClick" />
+		</StackPanel>
+
+		<ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="0,0,4,0">
+			<ItemsControl x:Name="StepList">
+				<ItemsControl.ItemTemplate>
+					<DataTemplate>
+						<StackPanel Margin="0,0,0,10">
+							<TextBlock Text="{Binding Caption}" Margin="0,0,0,3" />
+							<ProgressBar Height="8"
+							             Minimum="0"
+							             Maximum="100"
+							             Value="{Binding Percent, Mode=OneWay}"
+							             Foreground="#FF10A010"
+							             Background="#FFEDEDED"
+							             BorderThickness="0" />
+						</StackPanel>
+					</DataTemplate>
+				</ItemsControl.ItemTemplate>
+			</ItemsControl>
+		</ScrollViewer>
+
+		<TextBox x:Name="LogBox"
+		         Grid.Row="2"
+		         Margin="0,10,0,0"
+		         IsReadOnly="True"
+		         FontFamily="Consolas"
+		         TextWrapping="NoWrap"
+		         AcceptsReturn="True"
+		         VerticalScrollBarVisibility="Auto"
+		         HorizontalScrollBarVisibility="Auto" />
+	</Grid>
+</Window>

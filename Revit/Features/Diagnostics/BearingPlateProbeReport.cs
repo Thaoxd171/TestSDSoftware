@@ -139,15 +139,31 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                     .WhereElementIsNotElementType()
                     .FirstOrDefault();
 
+                // Sheet coordinates have no fixed origin, so everything is also reported relative to
+                // the lower-left corner of the title block - that is what a layout can be rebuilt from.
+                var paperOrigin = XYZ.Zero;
+
                 if (titleBlock != null)
                 {
                     var width = titleBlock.GetLength(BuiltInParameter.SHEET_WIDTH);
                     var height = titleBlock.GetLength(BuiltInParameter.SHEET_HEIGHT);
+                    var titleBlockBox = titleBlock.get_BoundingBox(sheet);
+                    paperOrigin = titleBlockBox?.Min ?? XYZ.Zero;
+
                     report.AppendLine($"    Title block        : {Describe(titleBlock)}");
                     report.AppendLine($"    Sheet size (mm)    : {width.FeetToMm():0.#} x {height.FeetToMm():0.#}");
+                    report.AppendLine($"    Title block origin : {Mm(titleBlock.GetLocationPoint())}");
+                    report.AppendLine($"    Title block bbox   : min {Mm(titleBlockBox?.Min)}  max {Mm(titleBlockBox?.Max)}");
                 }
 
-                report.AppendLine("    VIEWPORTS (positions are on the sheet, in mm from the sheet origin):");
+                TryLine(report, "    Sheet outline      : ", () =>
+                {
+                    var outline = sheet.Outline;
+                    return $"min ({outline.Min.U.FeetToMm():0.#}, {outline.Min.V.FeetToMm():0.#})  " +
+                           $"max ({outline.Max.U.FeetToMm():0.#}, {outline.Max.V.FeetToMm():0.#})";
+                });
+
+                report.AppendLine("    VIEWPORTS (\"paper\" = mm from the title block lower-left corner):");
                 foreach (var id in sheet.GetAllViewports())
                 {
                     var viewport = document.GetElement(id) as Viewport;
@@ -158,11 +174,12 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                     }
 
                     var outline = viewport.GetBoxOutline();
-                    var label = viewport.GetLabelOutline();
+                    var centre = viewport.GetBoxCenter();
                     report.AppendLine($"      \"{view.Name}\" ({view.ViewType}, 1:{view.Scale}) template=\"{NameOf(document, view.ViewTemplateId)}\"");
-                    report.AppendLine($"          centre  {Mm(viewport.GetBoxCenter())}");
+                    report.AppendLine($"          centre  {Mm(centre)}   paper {Mm(centre - paperOrigin)}");
                     report.AppendLine($"          box     min {Mm(outline.MinimumPoint)}  max {Mm(outline.MaximumPoint)}");
-                    report.AppendLine($"          label   min {Mm(label.MinimumPoint)}  max {Mm(label.MaximumPoint)}");
+                    report.AppendLine($"          size    {(outline.MaximumPoint.X - outline.MinimumPoint.X).FeetToMm():0.#} x " +
+                                      $"{(outline.MaximumPoint.Y - outline.MinimumPoint.Y).FeetToMm():0.#} mm");
                     report.AppendLine($"          vp type \"{NameOf(document, viewport.GetTypeId())}\"");
                 }
 
@@ -175,7 +192,9 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 foreach (var instance in scheduleInstances)
                 {
                     var schedule = document.GetElement(instance.ScheduleId) as ViewSchedule;
-                    report.AppendLine($"      \"{schedule?.Name}\"  point {Mm(instance.Point)}  segment={instance.SegmentIndex}");
+                        report.AppendLine(
+                        $"      \"{schedule?.Name}\"  point {Mm(instance.Point)}   " +
+                        $"paper {Mm(instance.Point - paperOrigin)}  segment={instance.SegmentIndex}");
                 }
             }
         }
@@ -204,17 +223,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
                 foreach (var dimension in dimensions.Take(12))
                 {
-                    var value = dimension.Value.HasValue ? $"{dimension.Value.Value.FeetToMm():0.#} mm" : "(multi)";
-                    report.AppendLine(
-                        $"  DIM  type=\"{NameOf(document, dimension.GetTypeId())}\"  shape={dimension.DimensionShape}" +
-                        $"  segments={dimension.NumberOfSegments}  value={value}");
-                    report.AppendLine($"       origin {Mm(dimension.Origin)}  refs={dimension.References.Size}");
-
-                    foreach (Reference reference in dimension.References)
-                    {
-                        var target = document.GetElement(reference.ElementId);
-                        report.AppendLine($"         ref {reference.ElementReferenceType,-22} -> {Describe(target)}");
-                    }
+                    DumpDimension(report, document, dimension);
                 }
 
                 if (dimensions.Count > 12)
@@ -224,17 +233,16 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
                 foreach (var tag in tags.Take(12))
                 {
-                    var tagged = tag.GetTaggedLocalElementIds()
-                        .Select(id => Describe(document.GetElement(id)))
-                        .ToList();
-
                     report.AppendLine(
                         $"  TAG  type=\"{NameOf(document, tag.GetTypeId())}\"  head {Mm(tag.TagHeadPosition)}" +
                         $"  leader={tag.HasLeader}  orientation={tag.TagOrientation}");
 
-                    foreach (var description in tagged)
+                    foreach (var id in tag.GetTaggedLocalElementIds())
                     {
-                        report.AppendLine($"         tags -> {description}");
+                        var target = document.GetElement(id);
+                        report.AppendLine(
+                            $"         -> mark=\"{target?.GetString(BuiltInParameter.ALL_MODEL_MARK)}\" " +
+                            $"name=\"{target?.LookupParameter("DATA-Navn")?.AsString()}\" {Describe(target)}");
                     }
                 }
 
@@ -290,6 +298,49 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 report.AppendLine(
                     $"{Trim(assembly.Name, 12),-12}{Trim(sheet?.SheetNumber, 16),-16}" +
                     $"{Trim(sheet?.Name, 30),-30}{string.Join(" | ", viewNames)}");
+            }
+        }
+
+        /// <summary>
+        /// Dimension members throw for several shapes - Origin is only valid on a single segment
+        /// dimension, Value only when there is exactly one - so every read is guarded individually.
+        /// </summary>
+        private static void DumpDimension(StringBuilder report, Document document, Dimension dimension)
+        {
+            try
+            {
+                report.AppendLine(
+                    $"  DIM  type=\"{NameOf(document, dimension.GetTypeId())}\"  shape={dimension.DimensionShape}" +
+                    $"  segments={dimension.NumberOfSegments}");
+
+                TryLine(report, "       value    : ", () => dimension.Value.HasValue
+                    ? $"{dimension.Value.Value.FeetToMm():0.#} mm"
+                    : string.Join(" | ", dimension.Segments
+                        .Cast<DimensionSegment>()
+                        .Select(s => s.Value.HasValue ? $"{s.Value.Value.FeetToMm():0.#}" : "?")) + " mm");
+
+                TryLine(report, "       origin   : ", () => Mm(dimension.Origin));
+                TryLine(report, "       curve    : ", () =>
+                {
+                    var curve = dimension.Curve;
+                    return curve == null || !curve.IsBound
+                        ? "(unbound)"
+                        : $"{Mm(curve.GetEndPoint(0))} -> {Mm(curve.GetEndPoint(1))}";
+                });
+
+                var references = dimension.References;
+                report.AppendLine($"       refs     : {references.Size}");
+                foreach (Reference reference in references)
+                {
+                    var target = document.GetElement(reference.ElementId);
+                    var mark = target?.GetString(BuiltInParameter.ALL_MODEL_MARK);
+                    report.AppendLine(
+                        $"         {reference.ElementReferenceType,-22} mark=\"{mark}\" -> {Describe(target)}");
+                }
+            }
+            catch (Exception ex)
+            {
+                report.AppendLine($"  DIM  (failed to read: {ex.Message})");
             }
         }
 
