@@ -59,7 +59,8 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 step: new XYZ(0, -step, 0),
                 orientation: TagOrientation.Horizontal);
 
-            PlaceLabel(view, labelType, new XYZ(box.Min.X, box.Min.Y - LabelOffsetMm.MmToFeet(), box.Max.Z));
+            PlaceLabel(view, labelType, new XYZ(box.Min.X, box.Min.Y - LabelOffsetMm.MmToFeet(), box.Max.Z),
+                AssemblyViewBuilder.PlanName);
             return placed;
         }
 
@@ -90,7 +91,8 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 step: new XYZ(0, 0, step),
                 orientation: TagOrientation.Horizontal);
 
-            PlaceLabel(view, labelType, new XYZ(box.Min.X, box.Min.Y, box.Min.Z - LabelOffsetMm.MmToFeet()));
+            PlaceLabel(view, labelType, new XYZ(box.Min.X, box.Min.Y, box.Min.Z - LabelOffsetMm.MmToFeet()),
+                AssemblyViewBuilder.FrontName);
             return placed;
         }
 
@@ -135,7 +137,11 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             return placed;
         }
 
-        private void PlaceLabel(View view, TextNoteType labelType, XYZ point)
+        /// <summary>
+        /// The label is the short drawing name - "Plan", "Front" - not the view's own name, which
+        /// Revit may have had to qualify to keep unique.
+        /// </summary>
+        private void PlaceLabel(View view, TextNoteType labelType, XYZ point, string label)
         {
             if (labelType == null)
             {
@@ -144,7 +150,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
 
             try
             {
-                TextNote.Create(_document, view.Id, point, view.Name, labelType.Id);
+                TextNote.Create(_document, view.Id, point, label, labelType.Id);
             }
             catch (Exception)
             {
