@@ -88,7 +88,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             var side = SideOffsetMm.MmToFeet();
             var end = EndOffsetMm.MmToFeet();
 
-            PlaceCluster(result, view, tagType, components,
+            // down the side of an elevation only the parts that stand proud of the plate are worth
+            // listing; a hole through it has no height of its own to call out here
+            PlaceCluster(result, view, tagType, components.Where(c => c.HasHeight).ToList(),
                 start: new XYZ(box.Min.X - side, box.Max.Y, box.Max.Z + end),
                 step: new XYZ(-step, 0, 0),
                 orientation: TagOrientation.Vertical);

@@ -33,7 +33,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             var result = new AnnotationResult();
 
             var box = plate.get_BoundingBox(null);
-            var faces = PlanarFacesOf(plate, result);
+            var faces = FacesOf(plate, result);
             if (box == null || faces.Count == 0)
             {
                 return result;
@@ -60,7 +60,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             var result = new AnnotationResult();
 
             var box = plate.get_BoundingBox(null);
-            var faces = PlanarFacesOf(plate, result);
+            var faces = FacesOf(plate, result);
             if (box == null || faces.Count == 0)
             {
                 return result;
@@ -86,7 +86,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             AnnotationResult result,
             View view,
             DimensionType type,
-            IList<PlanarFace> faces,
+            IList<PlateFace> faces,
             XYZ axis,
             string what,
             Line line)
@@ -124,20 +124,15 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         }
 
         /// <summary>The face pointing along <paramref name="direction"/> that sits furthest that way.</summary>
-        private static PlanarFace Outermost(IEnumerable<PlanarFace> faces, XYZ direction)
+        private static PlateFace Outermost(IEnumerable<PlateFace> faces, XYZ direction)
         {
             return faces
-                .Where(f => f.FaceNormal.IsAlmostEqualTo(direction, NormalTolerance))
+                .Where(f => f.Normal.IsAlmostEqualTo(direction, NormalTolerance))
                 .OrderByDescending(f => f.Origin.DotProduct(direction))
                 .FirstOrDefault();
         }
 
-        /// <summary>
-        /// Planar faces of the element that Revit will dimension to. References only come back when
-        /// the geometry is read with ComputeReferences, and a family instance keeps its geometry one
-        /// level down, inside a GeometryInstance.
-        /// </summary>
-        private List<PlanarFace> PlanarFacesOf(Element element, AnnotationResult result)
+        private List<PlateFace> FacesOf(Element element, AnnotationResult result)
         {
             var options = new Options
             {
@@ -146,41 +141,67 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 DetailLevel = ViewDetailLevel.Fine,
             };
 
-            var faces = Flatten(element.get_Geometry(options))
-                .OfType<Solid>()
-                .SelectMany(solid => solid.Faces.OfType<PlanarFace>())
-                .Where(face => face.Reference != null)
-                .ToList();
+            var faces = new List<PlateFace>();
+            Collect(element.get_Geometry(options), Transform.Identity, faces);
 
             if (faces.Count == 0)
             {
-                result.Note("the plate has no planar faces to dimension to");
+                result.Note("the plate has no planar faces Revit will dimension to");
             }
 
             return faces;
         }
 
-        private static IEnumerable<GeometryObject> Flatten(GeometryElement geometry)
+        /// <summary>
+        /// Walks the geometry collecting planar faces together with a reference Revit will dimension
+        /// to.
+        ///
+        /// A family instance keeps its geometry one level down. Reading it back through
+        /// GetInstanceGeometry gives shapes already placed in the model but with no usable
+        /// references, so the symbol geometry is read instead and the instance transform is carried
+        /// along to work out where each face ended up.
+        /// </summary>
+        private static void Collect(GeometryElement geometry, Transform transform, List<PlateFace> faces)
         {
             if (geometry == null)
             {
-                yield break;
+                return;
             }
 
             foreach (var item in geometry)
             {
                 if (item is GeometryInstance instance)
                 {
-                    foreach (var nested in Flatten(instance.GetInstanceGeometry()))
+                    Collect(instance.GetSymbolGeometry(), transform.Multiply(instance.Transform), faces);
+                }
+                else if (item is Solid solid)
+                {
+                    foreach (var face in solid.Faces.OfType<PlanarFace>().Where(f => f.Reference != null))
                     {
-                        yield return nested;
+                        faces.Add(new PlateFace(
+                            face.Reference,
+                            transform.OfVector(face.FaceNormal),
+                            transform.OfPoint(face.Origin)));
                     }
                 }
-                else
-                {
-                    yield return item;
-                }
             }
+        }
+
+        /// <summary>A face of the plate: where it is in the model, and how to point Revit at it.</summary>
+        private class PlateFace
+        {
+            public PlateFace(Reference reference, XYZ normal, XYZ origin)
+            {
+                Reference = reference;
+                Normal = normal;
+                Origin = origin;
+            }
+
+            public Reference Reference { get; }
+
+            public XYZ Normal { get; }
+
+            public XYZ Origin { get; }
         }
     }
 }
