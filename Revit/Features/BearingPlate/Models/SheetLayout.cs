@@ -21,17 +21,12 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
     /// </summary>
     public class SheetLayout
     {
-        /// <summary>Plan and front views are drawn at 1:5 on every reference sheet.</summary>
-        private const double DetailScale = 5.0;
-
         /// <summary>
-        /// Room the dimensions and tags take above and below the plate in the plan view, in paper
-        /// millimetres. Measured as a constant offset across the reference sheets.
+        /// Longest plate on an A4 sheet in the reference set is PL-12 at 320 mm; the shortest plate
+        /// on an A3 sheet is PL-08 at 375 mm. The cutoff sits in the middle of that 55 mm gap, so a
+        /// few thousandths of a millimetre of feet-to-mm rounding error can never flip the result.
         /// </summary>
-        private const double PlanAnnotationAllowanceMm = 59.0;
-
-        /// <summary>Tallest plan view an A4 sheet can still take.</summary>
-        private const double A4MaxPlanHeightMm = 123.0;
+        private const double A4MaxLengthMm = 347.5;
 
         /// <summary>A3 landscape is A4 portrait with the same block shifted a half sheet to the right.</summary>
         private const double A3ScheduleOffsetMm = 210.0;
@@ -76,8 +71,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
         /// <summary>Chooses the paper size from the plate's longest horizontal dimension.</summary>
         public static SheetFormat ChooseFormat(double plateLengthMm)
         {
-            var planHeight = plateLengthMm / DetailScale + PlanAnnotationAllowanceMm;
-            return planHeight <= A4MaxPlanHeightMm ? SheetFormat.A4Portrait : SheetFormat.A3Landscape;
+            return plateLengthMm <= A4MaxLengthMm ? SheetFormat.A4Portrait : SheetFormat.A3Landscape;
         }
 
         public static SheetLayout For(SheetFormat format)
