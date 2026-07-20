@@ -64,11 +64,18 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
 
         public View DefaultThreeDTemplate => Prefer(ThreeDTemplates, ViewPrefix + " 3D", "3d");
 
-        /// <summary>Preferred title block: A3 landscape from the REVGEN family, otherwise the first one.</summary>
-        public FamilySymbol DefaultTitleBlock =>
+        /// <summary>A4 portrait title block, preferring the REVGEN family; null when none exists.</summary>
+        public FamilySymbol A4TitleBlock =>
+            TitleBlocks.FirstOrDefault(t => Contains(t.Name, "A4") && Contains(t.Name, "Portrait"))
+            ?? TitleBlocks.FirstOrDefault(t => Contains(t.Name, "A4"));
+
+        /// <summary>A3 landscape title block, preferring the REVGEN family; null when none exists.</summary>
+        public FamilySymbol A3TitleBlock =>
             TitleBlocks.FirstOrDefault(t => Contains(t.Name, "A3") && Contains(t.Name, "Landscape"))
-            ?? TitleBlocks.FirstOrDefault(t => Contains(t.Name, "A3"))
-            ?? TitleBlocks.FirstOrDefault();
+            ?? TitleBlocks.FirstOrDefault(t => Contains(t.Name, "A3"));
+
+        /// <summary>Fallback used when a specific size cannot be found.</summary>
+        public FamilySymbol DefaultTitleBlock => A3TitleBlock ?? A4TitleBlock ?? TitleBlocks.FirstOrDefault();
 
         public View FindDetailTemplate(string name) => FindByName(DetailTemplates, name) ?? DefaultPlanTemplate;
 

@@ -5,53 +5,103 @@ using SDSoftware.RevitTest.Extensions;
 
 namespace SDSoftware.RevitTest.Features.BearingPlate.Models
 {
-    /// <summary>
-    /// Where things sit on the sheet, in millimetres measured from the lower-left corner of the
-    /// title block. The values are the ones measured on the reference drawing (A3 landscape).
-    /// A sheet has no fixed origin of its own, so every position is resolved against the title
-    /// block bounding box at generation time.
-    /// </summary>
-    public static class SheetLayout
+    public enum SheetFormat
     {
-        /// <summary>Centre of each viewport.</summary>
-        public static readonly (double X, double Y) PlanCentre = (107.1, 74.5);
+        A4Portrait,
+        A3Landscape,
+    }
 
-        public static readonly (double X, double Y) FrontCentre = (123.7, 189.3);
-
-        public static readonly (double X, double Y) ThreeDCentre = (397.1, 277.7);
+    /// <summary>
+    /// Where things sit on a bearing plate sheet, in millimetres from the lower-left corner of the
+    /// title block. The numbers were measured on the fifteen reference drawings.
+    ///
+    /// Two things are constant per paper size: the schedule block, and the column the plan and front
+    /// views are centred on. The viewport sizes are not - they grow with the amount of annotation -
+    /// so the views are anchored by an edge and nudged into place after they are measured.
+    /// </summary>
+    public class SheetLayout
+    {
+        /// <summary>Plan and front views are drawn at 1:5 on every reference sheet.</summary>
+        private const double DetailScale = 5.0;
 
         /// <summary>
-        /// Upper-left corner of each schedule, keyed by the distinctive part of its template name.
-        /// Matching is done on the template name so renamed templates still line up.
+        /// Room the dimensions and tags take above and below the plate in the plan view, in paper
+        /// millimetres. Measured as a constant offset across the reference sheets.
         /// </summary>
-        private static readonly Dictionary<string, (double X, double Y)> ScheduleCorners =
+        private const double PlanAnnotationAllowanceMm = 59.0;
+
+        /// <summary>Tallest plan view an A4 sheet can still take.</summary>
+        private const double A4MaxPlanHeightMm = 123.0;
+
+        /// <summary>A3 landscape is A4 portrait with the same block shifted a half sheet to the right.</summary>
+        private const double A3ScheduleOffsetMm = 210.0;
+
+        /// <summary>Upper-left corner of each schedule on A4, keyed by the distinctive part of the template name.</summary>
+        private static readonly Dictionary<string, (double X, double Y)> A4ScheduleCorners =
             new Dictionary<string, (double X, double Y)>(StringComparer.OrdinalIgnoreCase)
             {
-                ["Base Component"] = (215.0, 76.2),
-                ["Additional Components"] = (215.0, 72.1),
-                ["Weight"] = (275.0, 81.5),
-                ["Corrosion Category"] = (251.0, 62.0),
-                ["Surface Treatment"] = (251.0, 57.6),
-                ["Description"] = (320.8, 10.7),
+                ["Base Component"] = (5.0, 76.2),
+                ["Additional Components"] = (5.0, 72.1),
+                ["Corrosion Category"] = (41.0, 62.0),
+                ["Surface Treatment"] = (41.0, 57.6),
+                ["Weight"] = (65.0, 81.5),
+                ["Description"] = (110.8, 10.7),
             };
 
-        /// <summary>Fallback column for a schedule whose template name is not recognised.</summary>
-        private static readonly (double X, double Y) UnknownScheduleCorner = (215.0, 40.0);
-
-        private const double UnknownScheduleStep = 12.0;
-
-        public static (double X, double Y) ScheduleCornerFor(string templateName, int fallbackIndex)
+        private SheetLayout(SheetFormat format, double viewCentreX, double planBottomY, (double X, double Y) threeDTopRight)
         {
-            foreach (var pair in ScheduleCorners)
+            Format = format;
+            ViewCentreX = viewCentreX;
+            PlanBottomY = planBottomY;
+            ThreeDTopRight = threeDTopRight;
+        }
+
+        public SheetFormat Format { get; }
+
+        /// <summary>The column the plan and front views are centred on.</summary>
+        public double ViewCentreX { get; }
+
+        /// <summary>
+        /// Bottom edge of the plan view. On A4 the schedules occupy the lower left corner, so the
+        /// views start above them; on A3 the schedules sit in the right half and the views can go low.
+        /// </summary>
+        public double PlanBottomY { get; }
+
+        /// <summary>Upper-right corner of the 3D view.</summary>
+        public (double X, double Y) ThreeDTopRight { get; }
+
+        /// <summary>Gap between the top of the plan view and the bottom of the front view.</summary>
+        public double FrontGapY => 15.0;
+
+        /// <summary>Chooses the paper size from the plate's longest horizontal dimension.</summary>
+        public static SheetFormat ChooseFormat(double plateLengthMm)
+        {
+            var planHeight = plateLengthMm / DetailScale + PlanAnnotationAllowanceMm;
+            return planHeight <= A4MaxPlanHeightMm ? SheetFormat.A4Portrait : SheetFormat.A3Landscape;
+        }
+
+        public static SheetLayout For(SheetFormat format)
+        {
+            return format == SheetFormat.A4Portrait
+                ? new SheetLayout(format, viewCentreX: 87.1, planBottomY: 90.0, threeDTopRight: (208.0, 295.5))
+                : new SheetLayout(format, viewCentreX: 107.1, planBottomY: 7.0, threeDTopRight: (418.0, 296.0));
+        }
+
+        public (double X, double Y) ScheduleCornerFor(string templateName, int fallbackIndex)
+        {
+            var shift = Format == SheetFormat.A3Landscape ? A3ScheduleOffsetMm : 0.0;
+
+            foreach (var pair in A4ScheduleCorners)
             {
                 if (!string.IsNullOrEmpty(templateName) &&
                     templateName.IndexOf(pair.Key, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    return pair.Value;
+                    return (pair.Value.X + shift, pair.Value.Y);
                 }
             }
 
-            return (UnknownScheduleCorner.X, UnknownScheduleCorner.Y - fallbackIndex * UnknownScheduleStep);
+            // unknown template: stack it under the block so nothing is lost
+            return (5.0 + shift, 40.0 - fallbackIndex * 12.0);
         }
 
         /// <summary>Converts a paper position to sheet coordinates using the title block corner.</summary>

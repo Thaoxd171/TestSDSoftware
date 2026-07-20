@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Autodesk.Revit.DB;
 using SDSoftware.RevitTest.Core;
+using SDSoftware.RevitTest.Extensions;
 using SDSoftware.RevitTest.Features.BearingPlate.Models;
 
 namespace SDSoftware.RevitTest.Features.BearingPlate.Services
@@ -42,10 +43,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             var planTemplate = _catalog.DefaultPlanTemplate;
             var frontTemplate = _catalog.DefaultFrontTemplate;
             var threeDTemplate = _catalog.DefaultThreeDTemplate;
-            var titleBlock = _catalog.DefaultTitleBlock;
 
             progress.Log($"{plates.Count} plate(s) selected.");
-            progress.Log($"Title block: {titleBlock?.Name ?? "(none found)"}");
+            progress.Log($"Title blocks: A4 {_catalog.A4TitleBlock?.Name ?? "(none)"} / A3 {_catalog.A3TitleBlock?.Name ?? "(none)"}");
             progress.Log($"Templates: {Name(planTemplate)} / {Name(frontTemplate)} / {Name(threeDTemplate)}");
 
             using (var group = new TransactionGroup(_document, "Generate bearing plate drawings"))
@@ -77,7 +77,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                     }
                     else
                     {
-                        var result = Generate(plate, options, planTemplate, frontTemplate, threeDTemplate, titleBlock);
+                        var result = Generate(plate, options, planTemplate, frontTemplate, threeDTemplate);
                         results.Add(result);
                         progress.Log(result.Status == GenerationStatus.Created
                             ? $"{plate.Name}: sheet {result.SheetNumber}, {result.Views} view(s), {result.Schedules} schedule(s)"
@@ -144,8 +144,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             BearingPlateOptions options,
             View planTemplate,
             View frontTemplate,
-            View threeDTemplate,
-            FamilySymbol titleBlock)
+            View threeDTemplate)
         {
             if (!plate.HasAssembly)
             {
@@ -160,6 +159,16 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 {
                     var assemblyId = plate.Assembly.Id;
 
+                    // paper size follows the plate's longest horizontal dimension
+                    var box = plate.Plate.get_BoundingBox(null);
+                    var lengthMm = box == null ? 0 : Math.Max(
+                        (box.Max.X - box.Min.X).FeetToMm(),
+                        (box.Max.Y - box.Min.Y).FeetToMm());
+                    var layout = SheetLayout.For(SheetLayout.ChooseFormat(lengthMm));
+                    var titleBlock = layout.Format == SheetFormat.A4Portrait
+                        ? _catalog.A4TitleBlock ?? _catalog.DefaultTitleBlock
+                        : _catalog.A3TitleBlock ?? _catalog.DefaultTitleBlock;
+
                     var plan = _views.CreatePlan(assemblyId, IdOf(planTemplate));
                     var front = _views.CreateFront(assemblyId, IdOf(frontTemplate));
                     var threeD = options.CreateThreeD ? _views.CreateThreeD(assemblyId, IdOf(threeDTemplate)) : null;
@@ -171,11 +180,13 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                     var sheet = _sheets.Create(plate, IdOf(titleBlock), options);
                     var corner = _sheets.GetTitleBlockCorner(sheet);
 
-                    _sheets.PlaceView(sheet, plan, SheetLayout.ToSheetPoint(corner, SheetLayout.PlanCentre));
-                    _sheets.PlaceView(sheet, front, SheetLayout.ToSheetPoint(corner, SheetLayout.FrontCentre));
-                    _sheets.PlaceView(sheet, threeD, SheetLayout.ToSheetPoint(corner, SheetLayout.ThreeDCentre));
+                    // plan sits on its bottom anchor, front stacks above it, 3D hangs in the top-right
+                    var planViewport = _sheets.PlaceViewAnchoredBottom(sheet, plan, corner, layout.ViewCentreX, layout.PlanBottomY);
+                    var frontBottom = _sheets.GetTopEdgeMm(planViewport, corner) + layout.FrontGapY;
+                    _sheets.PlaceViewAnchoredBottom(sheet, front, corner, layout.ViewCentreX, frontBottom);
+                    _sheets.PlaceViewAnchoredTopRight(sheet, threeD, corner, layout.ThreeDTopRight.X, layout.ThreeDTopRight.Y);
 
-                    PlaceSchedules(sheet, schedules, corner);
+                    PlaceSchedules(sheet, schedules, corner, layout);
 
                     transaction.Commit();
 
@@ -200,13 +211,13 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             }
         }
 
-        private void PlaceSchedules(ViewSheet sheet, List<ViewSchedule> schedules, XYZ corner)
+        private void PlaceSchedules(ViewSheet sheet, List<ViewSchedule> schedules, XYZ corner, SheetLayout layout)
         {
             for (var index = 0; index < schedules.Count; index++)
             {
                 var schedule = schedules[index];
                 var templateName = _document.GetElement(schedule.ViewTemplateId)?.Name ?? schedule.Name;
-                var paper = SheetLayout.ScheduleCornerFor(templateName, index);
+                var paper = layout.ScheduleCornerFor(templateName, index);
                 _sheets.PlaceSchedule(sheet, schedule, SheetLayout.ToSheetPoint(corner, paper));
             }
         }

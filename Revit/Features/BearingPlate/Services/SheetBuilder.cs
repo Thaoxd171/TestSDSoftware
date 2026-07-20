@@ -1,6 +1,7 @@
 using System;
 using System.Linq;
 using Autodesk.Revit.DB;
+using SDSoftware.RevitTest.Extensions;
 using SDSoftware.RevitTest.Features.BearingPlate.Models;
 
 namespace SDSoftware.RevitTest.Features.BearingPlate.Services
@@ -48,6 +49,63 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             }
 
             return Viewport.Create(_document, sheet.Id, view.Id, centre);
+        }
+
+        /// <summary>
+        /// Places a view so that its box is centred on <paramref name="centreX"/> with its bottom
+        /// edge at <paramref name="bottomY"/> (paper mm from the title block corner). The box size
+        /// depends on the annotation inside the view, so it is measured after a provisional
+        /// placement and the viewport is then moved into position.
+        /// </summary>
+        public Viewport PlaceViewAnchoredBottom(ViewSheet sheet, View view, XYZ corner, double centreX, double bottomY)
+        {
+            var viewport = PlaceView(sheet, view, corner);
+            if (viewport == null)
+            {
+                return null;
+            }
+
+            _document.Regenerate();
+            var outline = viewport.GetBoxOutline();
+            var height = outline.MaximumPoint.Y - outline.MinimumPoint.Y;
+
+            viewport.SetBoxCenter(new XYZ(
+                corner.X + centreX.MmToFeet(),
+                corner.Y + bottomY.MmToFeet() + height / 2,
+                0));
+
+            return viewport;
+        }
+
+        /// <summary>
+        /// Places a view with its upper-right corner at the given paper position - used for the 3D
+        /// view sitting in the top-right corner of the sheet.
+        /// </summary>
+        public Viewport PlaceViewAnchoredTopRight(ViewSheet sheet, View view, XYZ corner, double rightX, double topY)
+        {
+            var viewport = PlaceView(sheet, view, corner);
+            if (viewport == null)
+            {
+                return null;
+            }
+
+            _document.Regenerate();
+            var outline = viewport.GetBoxOutline();
+            var width = outline.MaximumPoint.X - outline.MinimumPoint.X;
+            var height = outline.MaximumPoint.Y - outline.MinimumPoint.Y;
+
+            viewport.SetBoxCenter(new XYZ(
+                corner.X + rightX.MmToFeet() - width / 2,
+                corner.Y + topY.MmToFeet() - height / 2,
+                0));
+
+            return viewport;
+        }
+
+        /// <summary>Top edge of a placed viewport in paper mm, used to stack the next view above it.</summary>
+        public double GetTopEdgeMm(Viewport viewport, XYZ corner)
+        {
+            return viewport == null ? 0 : (viewport.GetBoxOutline().MaximumPoint.Y - corner.Y).FeetToMm();
         }
 
         public ScheduleSheetInstance PlaceSchedule(ViewSheet sheet, ViewSchedule schedule, XYZ upperLeft)

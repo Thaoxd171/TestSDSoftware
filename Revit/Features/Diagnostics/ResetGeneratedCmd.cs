@@ -86,7 +86,11 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             return dialog.Show() == TaskDialogResult.Yes;
         }
 
-        /// <summary>Activates a view that is not about to be deleted.</summary>
+        /// <summary>
+        /// Revit refuses to delete the view that is currently open, so step away from it first.
+        /// Candidates are tried one by one: the project browser and other internal views are listed
+        /// like any other view but cannot be activated.
+        /// </summary>
         private static void EscapeActiveView(CommandContext context, List<ViewSheet> sheets, List<View> views)
         {
             var doomed = sheets.Select(s => s.Id.ToLong())
@@ -98,14 +102,59 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 return;
             }
 
-            var survivor = context.Document.OfClass<View>()
-                .FirstOrDefault(v => !v.IsTemplate
-                                     && v.ViewType != ViewType.DrawingSheet
-                                     && !doomed.Contains(v.Id.ToLong()));
+            var candidates = context.Document.OfClass<View>()
+                .Where(v => IsActivatable(v) && !doomed.Contains(v.Id.ToLong()))
+                .OrderBy(v => ActivationPreference(v.ViewType));
 
-            if (survivor != null)
+            foreach (var candidate in candidates)
             {
-                context.UiDocument.ActiveView = survivor;
+                try
+                {
+                    context.UiDocument.ActiveView = candidate;
+                    return;
+                }
+                catch (Autodesk.Revit.Exceptions.ArgumentException)
+                {
+                    // not a view the user can open - try the next one
+                }
+            }
+        }
+
+        private static bool IsActivatable(View view)
+        {
+            if (view == null || view.IsTemplate)
+            {
+                return false;
+            }
+
+            switch (view.ViewType)
+            {
+                case ViewType.ProjectBrowser:
+                case ViewType.SystemBrowser:
+                case ViewType.Internal:
+                case ViewType.Undefined:
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>Prefer landing on an ordinary model view rather than a schedule or a sheet.</summary>
+        private static int ActivationPreference(ViewType type)
+        {
+            switch (type)
+            {
+                case ViewType.FloorPlan:
+                case ViewType.EngineeringPlan:
+                case ViewType.ThreeD:
+                    return 0;
+                case ViewType.Elevation:
+                case ViewType.Section:
+                case ViewType.Detail:
+                case ViewType.DraftingView:
+                    return 1;
+                default:
+                    return 2;
             }
         }
 
