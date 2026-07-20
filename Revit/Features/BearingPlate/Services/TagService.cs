@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using Autodesk.Revit.DB;
 using SDSoftware.RevitTest.Extensions;
 using SDSoftware.RevitTest.Features.BearingPlate.Models;
@@ -36,67 +37,76 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         /// Plan is drawn looking down, so both clusters run in the XY plane: one above the plate
         /// stepping left, one below it stepping down.
         /// </summary>
-        public int AnnotatePlan(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
+        public TagResult AnnotatePlan(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
         {
+            var result = new TagResult();
+
             var box = plate.get_BoundingBox(null);
             if (box == null)
             {
-                return 0;
+                result.Note("plate has no bounding box");
+                return result;
             }
 
             var step = StepMm.MmToFeet();
             var side = SideOffsetMm.MmToFeet();
             var end = EndOffsetMm.MmToFeet();
 
-            var placed = 0;
-            placed += PlaceCluster(view, tagType, components,
+            PlaceCluster(result, view, tagType, components,
                 start: new XYZ(box.Min.X - side, box.Max.Y + end, box.Max.Z),
                 step: new XYZ(-step, 0, 0),
                 orientation: TagOrientation.Vertical);
 
-            placed += PlaceCluster(view, tagType, components,
+            PlaceCluster(result, view, tagType, components,
                 start: new XYZ(box.Min.X - side, box.Min.Y - side, box.Max.Z),
                 step: new XYZ(0, -step, 0),
                 orientation: TagOrientation.Horizontal);
 
-            PlaceLabel(view, labelType, new XYZ(box.Min.X, box.Min.Y - LabelOffsetMm.MmToFeet(), box.Max.Z),
+            PlaceLabel(result, view, labelType,
+                new XYZ(box.Min.X, box.Min.Y - LabelOffsetMm.MmToFeet(), box.Max.Z),
                 AssemblyViewBuilder.PlanName);
-            return placed;
+
+            return result;
         }
 
         /// <summary>
         /// Front is drawn looking along -Y, so the clusters run in the XZ plane: one to the left of
         /// the plate stepping left, one to its right stepping up.
         /// </summary>
-        public int AnnotateFront(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
+        public TagResult AnnotateFront(View view, Element plate, IList<PlateComponent> components, FamilySymbol tagType, TextNoteType labelType)
         {
+            var result = new TagResult();
+
             var box = plate.get_BoundingBox(null);
             if (box == null)
             {
-                return 0;
+                result.Note("plate has no bounding box");
+                return result;
             }
 
             var step = StepMm.MmToFeet();
             var side = SideOffsetMm.MmToFeet();
             var end = EndOffsetMm.MmToFeet();
 
-            var placed = 0;
-            placed += PlaceCluster(view, tagType, components,
+            PlaceCluster(result, view, tagType, components,
                 start: new XYZ(box.Min.X - side, box.Max.Y, box.Max.Z + end),
                 step: new XYZ(-step, 0, 0),
                 orientation: TagOrientation.Vertical);
 
-            placed += PlaceCluster(view, tagType, components,
+            PlaceCluster(result, view, tagType, components,
                 start: new XYZ(box.Max.X + end, box.Max.Y, box.Max.Z + step),
                 step: new XYZ(0, 0, step),
                 orientation: TagOrientation.Horizontal);
 
-            PlaceLabel(view, labelType, new XYZ(box.Min.X, box.Min.Y, box.Min.Z - LabelOffsetMm.MmToFeet()),
+            PlaceLabel(result, view, labelType,
+                new XYZ(box.Min.X, box.Min.Y, box.Min.Z - LabelOffsetMm.MmToFeet()),
                 AssemblyViewBuilder.FrontName);
-            return placed;
+
+            return result;
         }
 
-        private int PlaceCluster(
+        private void PlaceCluster(
+            TagResult result,
             View view,
             FamilySymbol tagType,
             IList<PlateComponent> components,
@@ -106,15 +116,23 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         {
             if (tagType == null)
             {
-                return 0;
+                result.Note("no tag type available");
+                return;
             }
 
             tagType.EnsureActive();
+            var visible = VisibleElementIds(view);
 
-            var placed = 0;
             for (var index = 0; index < components.Count; index++)
             {
-                var point = start + step * index;
+                var component = components[index];
+                var target = component.Representative;
+
+                if (!visible.Contains(target.Id.ToLong()))
+                {
+                    result.Failure(component.Name, "not visible in this view");
+                    continue;
+                }
 
                 try
                 {
@@ -122,29 +140,41 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                         _document,
                         tagType.Id,
                         view.Id,
-                        new Reference(components[index].Representative),
+                        new Reference(target),
                         addLeader: false,
                         orientation,
-                        point);
-                    placed++;
+                        start + step * index);
+                    result.Success();
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // the part is not visible in this view - nothing to tag
+                    result.Failure(component.Name, ex.Message);
                 }
             }
+        }
 
-            return placed;
+        /// <summary>
+        /// What the view actually shows. A view template can hide a whole category, and Revit
+        /// refuses to tag an element the view does not display.
+        /// </summary>
+        private HashSet<long> VisibleElementIds(View view)
+        {
+            return new HashSet<long>(
+                new FilteredElementCollector(_document, view.Id)
+                    .WhereElementIsNotElementType()
+                    .ToElementIds()
+                    .Select(id => id.ToLong()));
         }
 
         /// <summary>
         /// The label is the short drawing name - "Plan", "Front" - not the view's own name, which
         /// Revit may have had to qualify to keep unique.
         /// </summary>
-        private void PlaceLabel(View view, TextNoteType labelType, XYZ point, string label)
+        private void PlaceLabel(TagResult result, View view, TextNoteType labelType, XYZ point, string label)
         {
             if (labelType == null)
             {
+                result.Note("no text type available for the label");
                 return;
             }
 
@@ -152,9 +182,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             {
                 TextNote.Create(_document, view.Id, point, label, labelType.Id);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
-                // a label is cosmetic; never fail the drawing over it
+                result.Note("label failed: " + ex.Message);
             }
         }
     }

@@ -184,13 +184,10 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                     drawing.Front = _views.CreateFront(assemblyId, IdOf(frontTemplate));
                     drawing.ThreeD = options.CreateThreeD ? _views.CreateThreeD(assemblyId, IdOf(threeDTemplate)) : null;
 
-                    if (options.CreateTags)
-                    {
-                        drawing.Tags = Annotate(drawing);
-                    }
+                    var report = options.CreateTags ? Annotate(drawing) : string.Empty;
 
                     transaction.Commit();
-                    progress.Log($"{plate.Name}: {drawing.ViewCount} view(s), {drawing.Tags} tag(s)");
+                    progress.Log($"{plate.Name}: {drawing.ViewCount} view(s){report}");
                 }
                 catch (Exception ex)
                 {
@@ -206,12 +203,13 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             }
         }
 
-        private int Annotate(PlateDrawing drawing)
+        /// <summary>Tags both detail views and returns a line describing what happened.</summary>
+        private string Annotate(PlateDrawing drawing)
         {
             var components = _components.Collect(drawing.Plate.Assembly);
             if (components.Count == 0)
             {
-                return 0;
+                return ", no parts to tag";
             }
 
             var tagType = _catalog.ComponentTagType;
@@ -222,8 +220,13 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             // everything visible in its view, annotation included
             _document.Regenerate();
 
-            return _tags.AnnotatePlan(drawing.Plan, plate, components, tagType, labelType)
-                   + _tags.AnnotateFront(drawing.Front, plate, components, tagType, labelType);
+            var plan = _tags.AnnotatePlan(drawing.Plan, plate, components, tagType, labelType);
+            var front = _tags.AnnotateFront(drawing.Front, plate, components, tagType, labelType);
+
+            drawing.Tags = plan.Placed + front.Placed;
+            return $", {components.Count} part kind(s), " +
+                   $"{plan.Describe(AssemblyViewBuilder.PlanName)}, " +
+                   $"{front.Describe(AssemblyViewBuilder.FrontName)}";
         }
 
         // ------------------------------------------------------------------ pass 3

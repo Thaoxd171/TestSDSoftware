@@ -1,5 +1,7 @@
 using System;
+using System.Linq;
 using Autodesk.Revit.DB;
+using SDSoftware.RevitTest.Extensions;
 
 namespace SDSoftware.RevitTest.Features.BearingPlate.Services
 {
@@ -14,6 +16,13 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         public const string PlanName = "Plan";
         public const string FrontName = "Front";
         public const string ThreeDName = "3D Ortho";
+
+        /// <summary>
+        /// Clearance kept in front of and behind the assembly. Revit's default section depth is
+        /// shallow enough to cut off the parts sitting under the plate, and anything clipped away
+        /// counts as not visible - it cannot be tagged and does not print.
+        /// </summary>
+        private const double DepthClearanceMm = 50.0;
 
         private readonly Document _document;
 
@@ -45,7 +54,51 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             var view = AssemblyViewUtils.CreateDetailSection(_document, assemblyId, orientation);
             Rename(view, name);
             ApplyTemplate(view, templateId);
+            FitFarClip(view, assemblyId);
             return view;
+        }
+
+        /// <summary>
+        /// Opens the section deep enough to contain the whole assembly, measured along the view
+        /// direction, with clearance on both sides.
+        /// </summary>
+        private void FitFarClip(View view, ElementId assemblyId)
+        {
+            var offset = view?.get_Parameter(BuiltInParameter.VIEWER_BOUND_OFFSET_FAR);
+            if (offset == null || offset.IsReadOnly)
+            {
+                return;
+            }
+
+            var box = BoundsOf(assemblyId);
+            if (box == null)
+            {
+                return;
+            }
+
+            // projected extent of an axis-aligned box onto the view direction
+            var size = box.Max - box.Min;
+            var direction = view.ViewDirection;
+            var depth = Math.Abs(size.X * direction.X)
+                        + Math.Abs(size.Y * direction.Y)
+                        + Math.Abs(size.Z * direction.Z);
+
+            offset.Set(depth + 2 * DepthClearanceMm.MmToFeet());
+        }
+
+        private BoundingBoxXYZ BoundsOf(ElementId assemblyId)
+        {
+            var assembly = _document.GetElement(assemblyId) as AssemblyInstance;
+            if (assembly == null)
+            {
+                return null;
+            }
+
+            // an assembly reports no bounding box of its own, so combine its members
+            return assembly.GetMemberIds()
+                .Select(_document.GetElement)
+                .Where(e => e != null)
+                .GetCombinedBoundingBox();
         }
 
         /// <summary>Keeps Revit's generated name when the wanted one is refused.</summary>
