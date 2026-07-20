@@ -214,13 +214,14 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             // everything visible in its view, annotation included
             _document.Regenerate();
 
+            // one list drives both: row i of the dimensions is named by tag i
+            var components = _components.Collect(drawing.Plate.Assembly, plate.get_BoundingBox(null));
             var report = string.Empty;
 
             if (options.CreateTags)
             {
                 var tagPlan = new AnnotationResult();
                 var tagFront = new AnnotationResult();
-                var components = _components.Collect(drawing.Plate.Assembly);
 
                 if (components.Count == 0)
                 {
@@ -242,7 +243,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             if (options.CreateDimensions)
             {
                 var type = _catalog.LinearDimensionType;
-                var dimPlan = _dimensions.DimensionPlan(drawing.Plan, plate, type);
+                var dimPlan = _dimensions.DimensionPlan(drawing.Plan, plate, components, type);
                 var dimFront = _dimensions.DimensionFront(drawing.Front, plate, type);
 
                 drawing.Dimensions = dimPlan.Placed + dimFront.Placed;

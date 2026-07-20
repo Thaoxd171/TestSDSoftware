@@ -20,8 +20,12 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             _document = document;
         }
 
-        /// <summary>Distinct kinds of part in the assembly, ordered by mark.</summary>
-        public List<PlateComponent> Collect(AssemblyInstance assembly)
+        /// <summary>
+        /// Distinct kinds of part in the assembly. The plate outline comes first because it owns the
+        /// row of overall dimensions; the rest follow by mark, which is the order the reference
+        /// drawings stack their dimension rows and tags in.
+        /// </summary>
+        public List<PlateComponent> Collect(AssemblyInstance assembly, BoundingBoxXYZ plateBox)
         {
             return assembly.GetMemberIds()
                 .Select(_document.GetElement)
@@ -29,8 +33,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 .Select(e => new { Element = e, Name = NameOf(e) })
                 .Where(x => !string.IsNullOrWhiteSpace(x.Name))
                 .GroupBy(x => x.Name)
-                .Select(g => new PlateComponent(g.Key, g.Select(x => x.Element).ToList()))
-                .OrderBy(c => c.Mark, StringComparer.OrdinalIgnoreCase)
+                .Select(g => new PlateComponent(g.Key, g.Select(x => x.Element).ToList(), plateBox))
+                .OrderByDescending(c => c.IsOutline)
+                .ThenBy(c => c.Mark, StringComparer.OrdinalIgnoreCase)
                 .ToList();
         }
 
