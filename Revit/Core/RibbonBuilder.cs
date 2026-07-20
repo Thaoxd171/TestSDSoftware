@@ -2,6 +2,7 @@ using System;
 using Autodesk.Revit.UI;
 using SDSoftware.RevitTest.Features.AdjustBeam;
 using SDSoftware.RevitTest.Features.BearingPlate;
+using SDSoftware.RevitTest.Features.Diagnostics;
 using SDSoftware.RevitTest.Features.SpiralStair;
 
 namespace SDSoftware.RevitTest.Core
@@ -45,6 +46,17 @@ namespace SDSoftware.RevitTest.Core
                 longDescription: "Creates a spiral staircase from radius, total height, number of risers, " +
                                  "sweep angle, run width and rotation direction.",
                 iconFile: "SpiralStair");
+
+            // Development aid - remove this panel before the final submission.
+            var diagnostics = application.CreateRibbonPanel(TabName, "Diagnostics");
+            AddButton<ModelProbeCmd>(
+                diagnostics,
+                name: "ModelProbe",
+                text: "Model\nProbe",
+                tooltip: "Survey the open model and show the report (read-only).",
+                longDescription: "Lists categories, assemblies, candidate bearing plates, title blocks " +
+                                 "and view templates so the tools can be written against the real model.",
+                iconFile: "ModelProbe");
         }
 
         private static PushButton AddButton<TCommand>(
