@@ -43,20 +43,22 @@ Output goes to `Revit\bin\<Configuration>\`.
 
 ## Install
 
-The build writes `SDRevitTest.addin` next to the output DLL and, by default, copies it to
+The build writes a ready-to-use `SDRevitTest.addin` next to the output DLL. Copy it into
 
 ```
 %APPDATA%\Autodesk\Revit\Addins\<version>\
 ```
 
-so the add-in loads the next time Revit starts. To build without touching the Revit Addins folder:
+and restart Revit. The `<Assembly>` path inside the manifest already points at the built DLL.
+
+The build can do that copy for you:
 
 ```
-msbuild SDRevitTest.sln /restore /p:Configuration=Revit_2025 /p:DeployAddin=false
+msbuild SDRevitTest.sln /restore /p:Configuration=Revit_2025 /p:DeployAddin=true
 ```
 
-To install manually, copy `SDRevitTest.addin` into the folder above and make sure the `<Assembly>` path
-inside it points at the built `SDRevitTest.dll`.
+It is off by default on purpose: once the manifest is deployed, Revit loads and locks the DLL at
+start-up, so the project cannot be rebuilt until Revit is closed.
 
 ## Architecture
 

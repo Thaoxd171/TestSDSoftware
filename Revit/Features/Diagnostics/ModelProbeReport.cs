@@ -5,13 +5,13 @@ using System.Text;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.UI;
 using SDSoftware.RevitTest.Extensions;
+using static SDSoftware.RevitTest.Features.Diagnostics.ProbeFormat;
 
 namespace SDSoftware.RevitTest.Features.Diagnostics
 {
     /// <summary>
-    /// Dumps everything the Bearing Plate tool needs to know about a model: categories present,
-    /// assemblies and their local coordinate systems, candidate plate families, title blocks and
-    /// view templates. Read-only — it never modifies the document.
+    /// Broad survey of a model: categories present, assemblies and their local coordinate systems,
+    /// candidate plate families, title blocks and view templates. Read-only.
     /// </summary>
     internal static class ModelProbeReport
     {
@@ -49,11 +49,10 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             report.AppendLine($"Revit          : {app.VersionName} (build {app.VersionBuild})");
             report.AppendLine($"Document       : {document.Title}");
             report.AppendLine($"Path           : {document.PathName}");
-            report.AppendLine($"Workshared     : {document.IsWorkshared}");
 
             var view = document.ActiveView;
             report.AppendLine($"Active view    : \"{view.Name}\" ({view.ViewType}) scale 1:{view.Scale}");
-            report.AppendLine($"View template  : {TemplateNameOf(document, view)}");
+            report.AppendLine($"View template  : {NameOf(document, view.ViewTemplateId)}");
 
             var lengthUnit = document.GetUnits().GetFormatOptions(SpecTypeId.Length).GetUnitTypeId();
             report.AppendLine($"Length unit    : {lengthUnit.TypeId}");
@@ -71,8 +70,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             report.AppendLine($"{"Category",-42}{"Count",8}   BuiltInCategory");
             foreach (var group in groups.Take(MaxRows))
             {
-                var category = group.First().Category;
-                var builtIn = (BuiltInCategory)category.Id.ToLong();
+                var builtIn = (BuiltInCategory)group.First().Category.Id.ToLong();
                 report.AppendLine($"{Trim(group.Key, 42),-42}{group.Count(),8}   {builtIn}");
             }
 
@@ -105,19 +103,16 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             {
                 var members = assembly.GetMemberIds();
                 var transform = assembly.GetTransform();
-                var box = assembly.get_BoundingBox(null);
 
                 report.AppendLine($"[{assembly.Id.ToLong()}] Name=\"{assembly.Name}\" Type=\"{assembly.AssemblyTypeName}\"");
                 report.AppendLine($"    NamingCategory : {NamingCategoryOf(document, assembly)}");
                 report.AppendLine($"    Members        : {members.Count}");
                 report.AppendLine($"    Origin (mm)    : {Mm(transform.Origin)}");
                 report.AppendLine($"    BasisX/Y/Z     : {Vec(transform.BasisX)}  {Vec(transform.BasisY)}  {Vec(transform.BasisZ)}");
-                report.AppendLine($"    BBox size (mm) : {BoxSize(box)}");
 
                 foreach (var id in members.Take(8))
                 {
-                    var member = document.GetElement(id);
-                    report.AppendLine($"      - {Describe(member)}");
+                    report.AppendLine($"      - {Describe(document.GetElement(id))}");
                 }
 
                 if (members.Count > 8)
@@ -158,26 +153,9 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                          .OrderByDescending(g => g.Count())
                          .Take(MaxRows))
             {
-                var box = group.First().get_BoundingBox(null);
                 report.AppendLine(
                     $"{Trim(group.Key.Category, 26),-26}{Trim(group.Key.Family, 30),-30}" +
-                    $"{Trim(group.Key.Type, 26),-26}{group.Count(),6}   {BoxSize(box)}");
-            }
-
-            report.AppendLine();
-            report.AppendLine("Per-instance detail (first 12):");
-            foreach (var element in candidates.Take(12))
-            {
-                var assembly = element.AssemblyInstanceId != null && element.AssemblyInstanceId != ElementId.InvalidElementId
-                    ? document.GetElement(element.AssemblyInstanceId)?.Name
-                    : null;
-
-                report.AppendLine($"  {Describe(element)}");
-                report.AppendLine($"      Assembly   : {assembly ?? "(none)"}");
-                report.AppendLine($"      Location   : {LocationOf(element)}");
-                report.AppendLine($"      Facing/Hand: {OrientationOf(element)}");
-                report.AppendLine($"      Level      : {LevelNameOf(document, element)}");
-                report.AppendLine($"      Host       : {HostOf(element)}");
+                    $"{Trim(group.Key.Type, 26),-26}{group.Count(),6}   {BoxSize(group.First().get_BoundingBox(null))}");
             }
         }
 
@@ -215,11 +193,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             report.AppendLine($"Title block types : {titleBlocks.Count}");
             foreach (var titleBlock in titleBlocks.Take(MaxRows))
             {
-                var width = titleBlock.GetLength(BuiltInParameter.SHEET_WIDTH);
-                var height = titleBlock.GetLength(BuiltInParameter.SHEET_HEIGHT);
-                report.AppendLine(
-                    $"  [{titleBlock.Id.ToLong()}] {titleBlock.FamilyName} : {titleBlock.Name}" +
-                    $"   sheet {width.FeetToMm():0} x {height.FeetToMm():0} mm");
+                report.AppendLine($"  [{titleBlock.Id.ToLong()}] {titleBlock.FamilyName} : {titleBlock.Name}");
             }
         }
 
@@ -252,16 +226,13 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             report.AppendLine($"Sheets : {sheets.Count}");
             foreach (var sheet in sheets.Take(MaxRows))
             {
-                var viewports = sheet.GetAllViewports().Count;
-                report.AppendLine($"  [{sheet.Id.ToLong()}] {sheet.SheetNumber,-14} \"{sheet.Name}\"  viewports={viewports}");
+                report.AppendLine($"  [{sheet.Id.ToLong()}] {sheet.SheetNumber,-14} \"{sheet.Name}\"  viewports={sheet.GetAllViewports().Count}");
             }
         }
 
         private static void ViewFamilyTypes(StringBuilder report, Document document)
         {
-            var types = document.OfClass<ViewFamilyType>()
-                .OrderBy(t => t.ViewFamily.ToString())
-                .ToList();
+            var types = document.OfClass<ViewFamilyType>().OrderBy(t => t.ViewFamily.ToString()).ToList();
 
             report.AppendLine($"View family types : {types.Count}");
             foreach (var type in types.Take(MaxRows))
@@ -288,9 +259,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
         private static void AnnotationTypes(StringBuilder report, Document document)
         {
-            var dimensionTypes = document.OfClass<DimensionType>()
-                .Where(t => !string.IsNullOrEmpty(t.Name))
-                .ToList();
+            var dimensionTypes = document.OfClass<DimensionType>().Where(t => !string.IsNullOrEmpty(t.Name)).ToList();
 
             report.AppendLine($"Dimension types : {dimensionTypes.Count}");
             foreach (var type in dimensionTypes.Take(20))
@@ -324,175 +293,12 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             return PlateKeywords.Any(k => haystack.IndexOf(k, StringComparison.OrdinalIgnoreCase) >= 0);
         }
 
-        private static string FamilyNameOf(Element element)
-        {
-            if (element is FamilyInstance instance)
-            {
-                return instance.Symbol?.FamilyName ?? "?";
-            }
-
-            return element.GetTypeAs<ElementType>()?.FamilyName ?? "(system)";
-        }
-
-        private static void DumpParameters(StringBuilder report, Element element)
-        {
-            foreach (Parameter parameter in element.Parameters)
-            {
-                if (parameter?.Definition == null)
-                {
-                    continue;
-                }
-
-                var builtIn = parameter.Definition is InternalDefinition internalDefinition
-                    ? internalDefinition.BuiltInParameter.ToString()
-                    : "(shared)";
-
-                report.AppendLine(
-                    $"  {Trim(parameter.Definition.Name, 34),-34} = {Trim(ValueOf(parameter), 30),-30}" +
-                    $" [{parameter.StorageType}] {builtIn}");
-            }
-        }
-
-        private static string ValueOf(Parameter parameter)
-        {
-            if (!parameter.HasValue)
-            {
-                return "(none)";
-            }
-
-            switch (parameter.StorageType)
-            {
-                case StorageType.Double:
-                    return $"{parameter.AsValueString()} ({parameter.AsDouble().FeetToMm():0.##} mm)";
-                case StorageType.Integer:
-                    return parameter.AsValueString() ?? parameter.AsInteger().ToString();
-                case StorageType.String:
-                    return parameter.AsString();
-                case StorageType.ElementId:
-                    return $"id {parameter.AsElementId().ToLong()}";
-                default:
-                    return "(none)";
-            }
-        }
-
-        private static string Describe(Element element)
-        {
-            if (element == null)
-            {
-                return "(null)";
-            }
-
-            var typeName = element.Document.GetElement(element.GetTypeId())?.Name ?? "?";
-            return $"id={element.Id.ToLong()} cat=\"{element.Category?.Name}\" family=\"{FamilyNameOf(element)}\" type=\"{typeName}\"";
-        }
-
-        private static string LocationOf(Element element)
-        {
-            var point = element.GetLocationPoint();
-            if (point != null)
-            {
-                return $"point {Mm(point)}";
-            }
-
-            var line = element.GetLocationLine();
-            if (line != null)
-            {
-                return $"line {Mm(line.GetEndPoint(0))} -> {Mm(line.GetEndPoint(1))}";
-            }
-
-            return "(no location)";
-        }
-
-        private static string OrientationOf(Element element)
-        {
-            if (element is FamilyInstance instance)
-            {
-                var rotation = (element.Location as LocationPoint)?.Rotation ?? 0;
-                return $"facing={Vec(instance.FacingOrientation)} hand={Vec(instance.HandOrientation)} " +
-                       $"rotation={rotation.RadiansToDegrees():0.##} deg  mirrored={instance.Mirrored}";
-            }
-
-            return "(not a family instance)";
-        }
-
-        private static string LevelNameOf(Document document, Element element)
-        {
-            return document.GetElement(element.LevelId)?.Name ?? "(none)";
-        }
-
-        private static string HostOf(Element element)
-        {
-            var host = (element as FamilyInstance)?.Host;
-            return host == null ? "(none)" : Describe(host);
-        }
-
         private static string NamingCategoryOf(Document document, AssemblyInstance assembly)
         {
             var id = assembly.NamingCategoryId;
-            if (id == null || id == ElementId.InvalidElementId)
-            {
-                return "(none)";
-            }
-
-            return Category.GetCategory(document, id)?.Name ?? id.ToLong().ToString();
-        }
-
-        private static string TemplateNameOf(Document document, View view)
-        {
-            var id = view.ViewTemplateId;
             return id == null || id == ElementId.InvalidElementId
                 ? "(none)"
-                : document.GetElement(id)?.Name ?? "?";
-        }
-
-        private static string Mm(XYZ point)
-        {
-            return point == null
-                ? "(null)"
-                : $"({point.X.FeetToMm():0.#}, {point.Y.FeetToMm():0.#}, {point.Z.FeetToMm():0.#})";
-        }
-
-        private static string Vec(XYZ vector)
-        {
-            return vector == null ? "(null)" : $"({vector.X:0.###}, {vector.Y:0.###}, {vector.Z:0.###})";
-        }
-
-        private static string BoxSize(BoundingBoxXYZ box)
-        {
-            if (box == null)
-            {
-                return "(no bbox)";
-            }
-
-            var size = box.Max - box.Min;
-            return $"{size.X.FeetToMm():0.#} x {size.Y.FeetToMm():0.#} x {size.Z.FeetToMm():0.#}";
-        }
-
-        private static string Trim(string value, int length)
-        {
-            if (string.IsNullOrEmpty(value))
-            {
-                return string.Empty;
-            }
-
-            return value.Length <= length ? value : value.Substring(0, length - 1) + "~";
-        }
-
-        private static void Section(StringBuilder report, string title, Action body)
-        {
-            report.AppendLine();
-            report.AppendLine("=======================================================================");
-            report.AppendLine("  " + title);
-            report.AppendLine("=======================================================================");
-
-            try
-            {
-                body();
-            }
-            catch (Exception ex)
-            {
-                report.AppendLine("!! section failed: " + ex.Message);
-            }
+                : Category.GetCategory(document, id)?.Name ?? id.ToLong().ToString();
         }
     }
 }

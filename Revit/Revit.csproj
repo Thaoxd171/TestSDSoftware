@@ -8,8 +8,10 @@
 		<OutputPath>$(MSBuildThisFileDirectory)bin\$(Configuration)\</OutputPath>
 		<RevitPath>C:\Program Files\Autodesk\Revit $(RevitVersion)\</RevitPath>
 
-		<!-- Set to false to skip writing the .addin manifest into the user's Revit Addins folder -->
-		<DeployAddin Condition="'$(DeployAddin)' == ''">true</DeployAddin>
+		<!-- The .addin manifest is always written next to the build output. Set DeployAddin=true to
+		     also copy it into the user's Revit Addins folder. Off by default: a deployed manifest makes
+		     Revit load - and lock - the DLL at start-up, which blocks rebuilding while Revit is open. -->
+		<DeployAddin Condition="'$(DeployAddin)' == ''">false</DeployAddin>
 		<AddinName>SD Revit Test</AddinName>
 		<AddinId>043BCC83-0050-4BA2-B71D-7770B305F31B</AddinId>
 		<AddinClass>SDSoftware.RevitTest.Core.App</AddinClass>

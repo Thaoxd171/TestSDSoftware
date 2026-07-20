@@ -57,6 +57,24 @@ namespace SDSoftware.RevitTest.Core
                 longDescription: "Lists categories, assemblies, candidate bearing plates, title blocks " +
                                  "and view templates so the tools can be written against the real model.",
                 iconFile: "ModelProbe");
+
+            AddButton<BearingPlateProbeCmd>(
+                diagnostics,
+                name: "BearingPlateProbe",
+                text: "Plate\nProbe",
+                tooltip: "Report one bearing plate assembly and its drawing in full detail (read-only).",
+                longDescription: "Select an assembly first to inspect that one. Reports members, assembly " +
+                                 "views, sheet layout with viewport centres in mm, dimensions, tags and schedules.",
+                iconFile: "ModelProbe");
+
+            AddButton<ResetGeneratedCmd>(
+                diagnostics,
+                name: "ResetGenerated",
+                text: "Reset\nDrawings",
+                tooltip: "Delete the assembly sheets and views so the generator can run again.",
+                longDescription: "Removes every sheet and view bound to an assembly. Assemblies, view " +
+                                 "templates, title blocks and families are kept.",
+                iconFile: "ModelProbe");
         }
 
         private static PushButton AddButton<TCommand>(
