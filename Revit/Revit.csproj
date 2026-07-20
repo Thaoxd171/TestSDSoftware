@@ -1,0 +1,75 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<Import Project="$(MSBuildThisFileDirectory)..\CommonProperties.props" />
+
+	<PropertyGroup>
+		<Configurations>Revit_2024;Revit_2025</Configurations>
+		<AssemblyName>SDRevitTest</AssemblyName>
+		<RootNamespace>SDSoftware.RevitTest</RootNamespace>
+		<OutputPath>$(MSBuildThisFileDirectory)bin\$(Configuration)\</OutputPath>
+		<RevitPath>C:\Program Files\Autodesk\Revit $(RevitVersion)\</RevitPath>
+
+		<!-- Set to false to skip writing the .addin manifest into the user's Revit Addins folder -->
+		<DeployAddin Condition="'$(DeployAddin)' == ''">true</DeployAddin>
+		<AddinName>SD Revit Test</AddinName>
+		<AddinId>043BCC83-0050-4BA2-B71D-7770B305F31B</AddinId>
+		<AddinClass>SDSoftware.RevitTest.Core.App</AddinClass>
+	</PropertyGroup>
+
+	<!-- Source / XAML. Wildcards are required because EnableDefaultCompileItems is disabled. -->
+	<ItemGroup>
+		<Compile Include="**\*.cs" Exclude="bin\**\*.cs;obj\**\*.cs" />
+		<Page Include="**\*.xaml" Exclude="bin\**\*.xaml;obj\**\*.xaml" />
+		<!-- Icons are embedded so the add-in ships as a single DLL (see Core\ImageUtils.cs) -->
+		<EmbeddedResource Include="Resources\**\*.png" />
+	</ItemGroup>
+
+	<!-- DataContractJsonSerializer for settings persistence (in-box on .NET 8) -->
+	<ItemGroup Condition="'$(TargetFramework)' == 'net48'">
+		<Reference Include="System.Runtime.Serialization" />
+	</ItemGroup>
+
+	<!-- Revit API. Private=False: never copy Revit's own assemblies to the output. -->
+	<ItemGroup>
+		<Reference Include="AdWindows">
+			<HintPath>$(RevitPath)AdWindows.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="RevitAPI">
+			<HintPath>$(RevitPath)RevitAPI.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+		<Reference Include="RevitAPIUI">
+			<HintPath>$(RevitPath)RevitAPIUI.dll</HintPath>
+			<Private>False</Private>
+		</Reference>
+	</ItemGroup>
+
+	<Target Name="CheckRevitInstalled" BeforeTargets="ResolveAssemblyReferences" Condition="!Exists('$(RevitPath)RevitAPI.dll')">
+		<Error Text="Revit $(RevitVersion) was not found at '$(RevitPath)'. Pick the Configuration that matches an installed Revit version (Revit_2024 or Revit_2025)." />
+	</Target>
+
+	<!-- Write the .addin manifest next to the build output, and (optionally) into the
+	     per-user Revit Addins folder so the add-in loads on the next Revit start. -->
+	<Target Name="WriteAddinManifest" AfterTargets="Build">
+		<PropertyGroup>
+			<_AddinAssembly>$([System.IO.Path]::GetFullPath('$(OutputPath)$(AssemblyName).dll'))</_AddinAssembly>
+			<_AddinManifest>$(OutputPath)$(AssemblyName).addin</_AddinManifest>
+			<_RevitAddinFolder>$(APPDATA)\Autodesk\Revit\Addins\$(RevitVersion)\</_RevitAddinFolder>
+			<_AddinXml><![CDATA[<?xml version="1.0" encoding="utf-8"?>
+<RevitAddIns>
+  <AddIn Type="Application">
+    <Name>$(AddinName)</Name>
+    <Assembly>$(_AddinAssembly)</Assembly>
+    <AddInId>$(AddinId)</AddInId>
+    <FullClassName>$(AddinClass)</FullClassName>
+    <VendorId>SDSW</VendorId>
+    <VendorDescription>SD Software</VendorDescription>
+  </AddIn>
+</RevitAddIns>]]></_AddinXml>
+		</PropertyGroup>
+		<WriteLinesToFile File="$(_AddinManifest)" Lines="$(_AddinXml)" Overwrite="true" WriteOnlyWhenDifferent="true" Encoding="UTF-8" />
+		<MakeDir Directories="$(_RevitAddinFolder)" Condition="'$(DeployAddin)' == 'true'" />
+		<Copy SourceFiles="$(_AddinManifest)" DestinationFolder="$(_RevitAddinFolder)" Condition="'$(DeployAddin)' == 'true'" />
+		<Message Importance="high" Text="Add-in manifest deployed to $(_RevitAddinFolder)" Condition="'$(DeployAddin)' == 'true'" />
+	</Target>
+</Project>

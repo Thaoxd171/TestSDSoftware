@@ -1,0 +1,15 @@
+<Project>
+	<!-- Keep intermediate output (obj) outside the repo folder.
+	     The repo lives on a Google Drive synced path, so obj/ would otherwise be
+	     uploaded on every build and can cause file locks.
+	     MSBuildProjectExtensionsPath (project.assets.json) is split per Configuration so that
+	     switching between net48 (Revit 2024) and net8 (Revit 2025) does not force a full restore. -->
+	<PropertyGroup>
+		<!-- WPF markup compile spawns a temporary "<Name>_xxxxxxxx_wpftmp" project in the same folder;
+		     strip the suffix so it shares obj (and the restored assets) with the real project -->
+		<_SDObjProjectName>$([System.Text.RegularExpressions.Regex]::Replace('$(MSBuildProjectName)', '_[^_]+_wpftmp$', ''))</_SDObjProjectName>
+		<BaseIntermediateOutputPath>$(LOCALAPPDATA)\SDRevitBuild\$(_SDObjProjectName)\obj\</BaseIntermediateOutputPath>
+		<MSBuildProjectExtensionsPath Condition="'$(Configuration)' != ''">$(BaseIntermediateOutputPath)$(Configuration)\</MSBuildProjectExtensionsPath>
+		<MSBuildProjectExtensionsPath Condition="'$(Configuration)' == ''">$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+	</PropertyGroup>
+</Project>
