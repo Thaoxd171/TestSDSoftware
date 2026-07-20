@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using Autodesk.Revit.DB;
 using SDSoftware.RevitTest.Extensions;
@@ -31,9 +32,14 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             _document = document;
         }
 
+        /// <summary>
+        /// Looking straight down from above the assembly. HorizontalDetail would cut through it -
+        /// Revit puts that cut a couple of millimetres below the top face - and everything above the
+        /// cut is dropped, including the parts that have to be tagged.
+        /// </summary>
         public View CreatePlan(ElementId assemblyId, ElementId templateId)
         {
-            return CreateDetail(assemblyId, AssemblyDetailViewOrientation.HorizontalDetail, templateId, PlanName);
+            return CreateDetail(assemblyId, AssemblyDetailViewOrientation.ElevationTop, templateId, PlanName);
         }
 
         public View CreateFront(ElementId assemblyId, ElementId templateId)
@@ -59,8 +65,11 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         }
 
         /// <summary>
-        /// Opens the section deep enough to contain the whole assembly, measured along the view
-        /// direction, with clearance on both sides.
+        /// Opens the section deep enough to reach past the whole assembly.
+        ///
+        /// The depth is measured from the view's own plane, not from the assembly: Revit can place
+        /// that plane far away, and a far clip sized only to the assembly would then cut everything
+        /// out of the drawing.
         /// </summary>
         private void FitFarClip(View view, ElementId assemblyId)
         {
@@ -76,14 +85,32 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 return;
             }
 
-            // projected extent of an axis-aligned box onto the view direction
-            var size = box.Max - box.Min;
-            var direction = view.ViewDirection;
-            var depth = Math.Abs(size.X * direction.X)
-                        + Math.Abs(size.Y * direction.Y)
-                        + Math.Abs(size.Z * direction.Z);
+            // ViewDirection points towards the viewer, so depth into the drawing runs the other way
+            var into = view.ViewDirection.Negate();
+            var origin = view.Origin;
+            var depth = Corners(box).Max(corner => (corner - origin).DotProduct(into));
 
-            offset.Set(depth + 2 * DepthClearanceMm.MmToFeet());
+            if (depth <= 0)
+            {
+                // the assembly sits behind the view plane; leave Revit's default alone
+                return;
+            }
+
+            offset.Set(depth + DepthClearanceMm.MmToFeet());
+        }
+
+        private static IEnumerable<XYZ> Corners(BoundingBoxXYZ box)
+        {
+            foreach (var x in new[] { box.Min.X, box.Max.X })
+            {
+                foreach (var y in new[] { box.Min.Y, box.Max.Y })
+                {
+                    foreach (var z in new[] { box.Min.Z, box.Max.Z })
+                    {
+                        yield return new XYZ(x, y, z);
+                    }
+                }
+            }
         }
 
         private BoundingBoxXYZ BoundsOf(ElementId assemblyId)
