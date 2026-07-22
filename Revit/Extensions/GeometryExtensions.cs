@@ -62,5 +62,68 @@ namespace SDSoftware.RevitTest.Extensions
             var offset = new XYZ(margin, margin, margin);
             return new BoundingBoxXYZ { Min = box.Min - offset, Max = box.Max + offset };
         }
+
+        /// <summary>
+        /// Every solid of an element, including the ones nested inside geometry instances. Returns an
+        /// empty sequence rather than throwing when the element has no readable geometry.
+        /// </summary>
+        public static IEnumerable<Solid> GetSolids(this Element element, ViewDetailLevel detail = ViewDetailLevel.Fine)
+        {
+            GeometryElement geometry;
+            try
+            {
+                geometry = element?.get_Geometry(new Options { DetailLevel = detail, ComputeReferences = false });
+            }
+            catch
+            {
+                return Enumerable.Empty<Solid>();
+            }
+
+            return geometry == null ? Enumerable.Empty<Solid>() : Flatten(geometry);
+        }
+
+        /// <summary>Points along the edges of a solid - enough to bound it in any direction.</summary>
+        public static IEnumerable<XYZ> GetVertices(this Solid solid)
+        {
+            foreach (Edge edge in solid.Edges)
+            {
+                foreach (var point in edge.Tessellate())
+                {
+                    yield return point;
+                }
+            }
+        }
+
+        /// <summary>How far a set of solids reaches along a direction, relative to an origin.</summary>
+        public static (double Min, double Max) ExtentAlong(this IEnumerable<Solid> solids, XYZ origin, XYZ direction)
+        {
+            var distances = solids
+                .SelectMany(GetVertices)
+                .Select(point => point.Subtract(origin).DotProduct(direction))
+                .ToList();
+
+            return distances.Count == 0 ? (0, 0) : (distances.Min(), distances.Max());
+        }
+
+        private static IEnumerable<Solid> Flatten(GeometryElement geometry)
+        {
+            foreach (var item in geometry)
+            {
+                switch (item)
+                {
+                    case Solid solid when solid.Volume > 0:
+                        yield return solid;
+                        break;
+
+                    case GeometryInstance instance:
+                        foreach (var nested in Flatten(instance.GetInstanceGeometry()))
+                        {
+                            yield return nested;
+                        }
+
+                        break;
+                }
+            }
+        }
     }
 }

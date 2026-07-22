@@ -5,7 +5,7 @@ Revit add-in submitted for the SD Software technical test. It adds a **SD Softwa
 | Tool | What it does |
 |---|---|
 | **Bearing Plate** | Generates bearing plate detail drawings automatically — creates the detail views, dimensions and tags, then places them on sheets. |
-| **Adjust Beam** | Adjusts structural framing elements (extend / trim / align) against the selected reference and reports what changed. |
+| **Adjust Beam** | Trims and extends beams so every end keeps the clearance you set from the wall, pillar or beam it runs into. |
 | **Spiral Stair** | Builds a spiral staircase from a few parameters (radius, total height, riser count, sweep angle, run width, rotation direction). |
 
 ## Demo videos

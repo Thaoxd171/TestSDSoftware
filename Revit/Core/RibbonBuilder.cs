@@ -33,9 +33,10 @@ namespace SDSoftware.RevitTest.Core
                 modelling,
                 name: "AdjustBeam",
                 text: "Adjust\nBeams",
-                tooltip: "Adjust structural framing elements against a reference.",
-                longDescription: "Extends, trims or aligns the selected structural framing elements and " +
-                                 "reports every element that was changed.",
+                tooltip: "Trim and extend beams to the right clearance from their supports.",
+                longDescription: "Set the clearances, then pick the beams in the model. Every end is moved " +
+                                 "to the clearance you asked for from the wall, pillar or beam it runs " +
+                                 "into, and the report says what moved and against what.",
                 iconFile: "AdjustBeam");
 
             AddButton<SpiralStairCmd>(
@@ -66,6 +67,26 @@ namespace SDSoftware.RevitTest.Core
                 longDescription: "Select an assembly first to inspect that one. Reports members, assembly " +
                                  "views, sheet layout with viewport centres in mm, dimensions, tags and schedules.",
                 iconFile: "ModelProbe");
+
+            AddButton<AdjustBeamProbeCmd>(
+                diagnostics,
+                name: "AdjustBeamProbe",
+                text: "Beam\nProbe",
+                tooltip: "Measure every beam end against its supports and show the report (read-only).",
+                longDescription: "Select beams first to inspect only those, otherwise every beam in the " +
+                                 "active view is measured. Reports the distance from each beam end to the " +
+                                 "near face, far face and centre of the walls, columns and beams around it.",
+                iconFile: "AdjustBeam");
+
+            AddButton<AdjustBeamExplainCmd>(
+                diagnostics,
+                name: "AdjustBeamExplain",
+                text: "Beam\nExplain",
+                tooltip: "Dry run of Adjust Beams: report every decision without changing anything.",
+                longDescription: "Pick the beams as usual. For each end it lists the supports the tool " +
+                                 "found, the ones it discarded and why, which one governs, and where the " +
+                                 "end would move to. The model is not touched.",
+                iconFile: "AdjustBeam");
 
             AddButton<ResetGeneratedCmd>(
                 diagnostics,

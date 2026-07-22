@@ -74,7 +74,7 @@ namespace SDSoftware.RevitTest.Core.Progress
 
             IsCancelled = true;
             StopButton.IsEnabled = false;
-            Log("Stopping after the current plate...");
+            Log("Stopping as soon as the current item is finished...");
         }
 
         private void OnCopyClick(object sender, RoutedEventArgs e)
@@ -96,7 +96,7 @@ namespace SDSoftware.RevitTest.Core.Progress
             {
                 e.Cancel = true;
                 IsCancelled = true;
-                Log("Stopping after the current plate...");
+                Log("Stopping as soon as the current item is finished...");
                 return;
             }
 
