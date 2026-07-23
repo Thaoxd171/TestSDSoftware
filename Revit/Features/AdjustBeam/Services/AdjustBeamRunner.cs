@@ -55,8 +55,13 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
             IList<BeamPlan> plans = null;
 
+            // The openings this tool cuts reach past the beams they cut, so that the corners come out
+            // clean; Revit says so every time, and it is not worth asking about.
+            var expected = ExpectedWarnings.FromOpeningsThatOverreach();
+
             using (var transaction = new Transaction(_document, "Adjust Beams"))
             {
+                expected.TakeChargeOf(transaction);
                 transaction.Start();
 
                 for (var round = 1; round <= MaximumRounds && !progress.IsCancelled; round++)
@@ -101,6 +106,12 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 }
 
                 transaction.Commit();
+            }
+
+            if (expected.Count > 0)
+            {
+                progress.Log($"{expected.Count} \"opening partially cuts its host\" warning(s) let past: " +
+                             "the cuts are meant to reach beyond the beams they trim.");
             }
 
             if (progress.IsCancelled)
