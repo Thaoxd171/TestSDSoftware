@@ -26,6 +26,26 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
         /// <summary>Planes are treated as parallel below this angle.</summary>
         private const double ParallelDegrees = 2;
 
+        /// <summary>
+        /// When the running assembly was built, and where it was loaded from. Revit holds an add-in
+        /// for the whole session, so a report can easily be read as the answer of code that was
+        /// rebuilt after the session began. This says outright which build answered.
+        /// </summary>
+        private static string BuildStamp()
+        {
+            try
+            {
+                var path = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                return string.IsNullOrEmpty(path)
+                    ? "(unknown)"
+                    : $"{System.IO.File.GetLastWriteTime(path):yyyy-MM-dd HH:mm:ss}   from {path}";
+            }
+            catch (Exception error)
+            {
+                return $"(unknown: {error.Message})";
+            }
+        }
+
         /// <summary>A face further away than this has nothing to do with the joint being looked at.</summary>
         private const double ReachMm = 2000;
 
@@ -69,6 +89,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             Section(report, "SD REVIT TEST - SELECTION PROBE", () =>
             {
                 report.AppendLine($"Generated : {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
+                report.AppendLine($"Built     : {BuildStamp()}");
                 report.AppendLine($"Document  : {document.Title}");
                 report.AppendLine($"Selected  : {elements.Count}");
                 report.AppendLine($"Sorted as : {beams.Count} beam(s), {columns.Count} column(s), " +
@@ -287,6 +308,11 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
                         report.AppendLine($"  {limit.Describe(),-34} -> {limit.TargetMm,9:+0.#;-0.#;0}" +
                                           $"{mark}{wedge}{note}");
+
+                        if (!string.IsNullOrEmpty(limit.Support?.EntryNote))
+                        {
+                            report.AppendLine($"      skew {limit.SkewDegrees:0.##} {limit.Support.EntryNote}");
+                        }
                     }
 
                     Verdict(report, supports, geometry, end, options);
@@ -321,26 +347,33 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 ? $", cut {plan.SkewDegrees:0.##} deg off square with the face at {plan.CutPlaneMm:+0.#;-0.#;0}"
                 : ", no cut";
 
-            // An end that gets cut is judged on its axis, which is what the tool writes and the opening
-            // then trims back from. An end left square is judged on the solid, because the tool always
-            // clears the end extension and puts the axis where the material is to stop - so a model
-            // that shortened the same end by setting an extension instead lands in the same place
-            // while its axis sits somewhere else entirely, and reading the axis would call that a
-            // disagreement when the two agree exactly.
-            var travel = plan.NeedsCut ? plan.AxisTravelMm : plan.MoveMm;
             var carried = geometry.AxisOffsetMm(end);
 
             report.AppendLine($"  decision: move the {(plan.NeedsCut ? "axis" : "end")} " +
-                              $"{travel:+0.#;-0.#;0}{cut}" +
+                              $"{(plan.NeedsCut ? plan.AxisTravelMm : plan.MoveMm):+0.#;-0.#;0}{cut}" +
                               (Math.Abs(carried) < BeamEndPlan.NegligibleMoveMm
                                   ? string.Empty
                                   : $"   (the model's axis stands {carried:+0.#;-0.#;0} from where its " +
                                     "material stops)"));
 
-            report.AppendLine(Math.Abs(travel) < BeamEndPlan.NegligibleMoveMm
-                ? "  ** agrees on the position **"
-                : $"  ** DISAGREES on the position: the model has this end where it is, the tool " +
-                  $"would move it {travel:0.#} mm **");
+            // An end left square is judged on the solid, because the tool always clears the end
+            // extension and puts the axis where the material is to stop - so a model that shortened
+            // the same end by setting an extension instead lands in the same place while its axis sits
+            // somewhere else entirely.
+            //
+            // A cut end is not judged here at all. What shows on such an end is the face the opening
+            // leaves, and where the axis runs on to behind that face is nobody's business: the
+            // reference model puts it in a different place on every one of them, sometimes hard up
+            // against the cut and sometimes ninety millimetres out. Comparing axes there raised three
+            // complaints of a millimetre or six about ends whose faces matched to a tenth. The cut
+            // face is compared instead, below.
+            if (!plan.NeedsCut)
+            {
+                report.AppendLine(Math.Abs(plan.MoveMm) < BeamEndPlan.NegligibleMoveMm
+                    ? "  ** agrees on the position **"
+                    : $"  ** DISAGREES on the position: the model has this end where it is, the tool " +
+                      $"would move it {plan.MoveMm:0.#} mm **");
+            }
 
             Cuts(report, geometry, end, plan);
         }
@@ -368,6 +401,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 .ToList();
 
             var squaresOff = false;
+            var faces = new List<double>();
 
             foreach (var item in found)
             {
@@ -383,13 +417,22 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 var planes = item.edges
                     .Select(edge => Crossing(edge, origin, outward))
                     .Where(distance => distance.HasValue)
-                    .Select(distance => $"{distance.Value.FeetToMm():+0.#;-0.#;0}")
+                    .Select(distance => distance.Value.FeetToMm())
                     .ToList();
+
+                if (whole)
+                {
+                    faces.AddRange(planes);
+                }
 
                 report.AppendLine($"  model has opening {item.opening.Id.ToLong()}: " +
                                   $"{width:0.#} across the beam, " +
                                   (whole ? "squares the end off" : "a notch, not the width of the beam") +
-                                  (planes.Count == 0 ? string.Empty : ", faces at " + string.Join(" and ", planes)));
+                                  (planes.Count == 0
+                                      ? string.Empty
+                                      : ", faces at " + string.Join(
+                                          " and ",
+                                          planes.Select(plane => $"{plane:+0.#;-0.#;0}"))));
             }
 
             if (found.Count == 0)
@@ -397,11 +440,26 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 report.AppendLine("  model has no opening at this end");
             }
 
-            if (plan.NeedsCut == squaresOff)
+            if (plan.NeedsCut && squaresOff)
             {
-                report.AppendLine(plan.NeedsCut
-                    ? "  ** both square this end off - compare the faces above with the tool's **"
-                    : "  ** both leave this end square **");
+                // The face is what shows on a cut end, so it is the face that is compared. Which of
+                // the opening's two faces is the finished one is not worth working out - the other is
+                // a beam's width of skew away, far outside anything that would pass for agreement.
+                var nearest = faces.OrderBy(face => Math.Abs(face - plan.CutPlaneMm.Value)).First();
+                var apart = Math.Abs(nearest - plan.CutPlaneMm.Value);
+
+                report.AppendLine(apart < BeamEndPlan.NegligibleMoveMm
+                    ? $"  ** agrees on the cut face: {plan.CutPlaneMm:+0.#;-0.#;0} against " +
+                      $"{nearest:+0.#;-0.#;0} **"
+                    : $"  ** DISAGREES on the cut face: the tool would cut at " +
+                      $"{plan.CutPlaneMm:+0.#;-0.#;0}, the model cuts at {nearest:+0.#;-0.#;0}, " +
+                      $"{apart:0.#} mm apart **");
+                return;
+            }
+
+            if (!plan.NeedsCut && !squaresOff)
+            {
+                report.AppendLine("  ** both leave this end square **");
                 return;
             }
 
@@ -723,7 +781,8 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             {
                 var offset = (face.Point - column.Centre).DotProduct(face.Normal).FeetToMm();
                 report.AppendLine($"  normal {Vec(face.Normal)}   at {Mm(face.Point)}   " +
-                                  $"{offset:+0.#;-0.#;0} from the centre   area {face.AreaMm2:0} mm2");
+                                  $"{offset:+0.#;-0.#;0} from the centre   area {face.AreaMm2:0} mm2" +
+                                  $"   {face.Height}");
             }
         }
 
@@ -823,7 +882,8 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             foreach (var face in part.Uprights)
             {
-                report.AppendLine($"  normal {Vec(face.Normal)}   at {Mm(face.Point)}   area {face.AreaMm2:0} mm2");
+                report.AppendLine($"  normal {Vec(face.Normal)}   at {Mm(face.Point)}" +
+                                  $"   area {face.AreaMm2:0} mm2   {face.Height}");
             }
         }
 
@@ -1245,6 +1305,18 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             public double AreaMm2 { get; set; }
 
+            /// <summary>
+            /// How high the face itself stands. Its Point is a point on the plane and can sit well
+            /// away from the face, so it says nothing about where the material is.
+            /// </summary>
+            public double? BottomMm { get; set; }
+
+            public double? TopMm { get; set; }
+
+            public string Height => BottomMm == null
+                ? "height unknown"
+                : $"z {BottomMm:0.#} to {TopMm:0.#}";
+
             public double Offset => Point.DotProduct(Normal);
         }
 
@@ -1427,11 +1499,15 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
                 foreach (var face in faces)
                 {
+                    var range = face.ZRange();
+
                     var plane = new FacePlane
                     {
                         Normal = face.FaceNormal,
                         Point = face.Origin,
                         AreaMm2 = face.Area.FeetToMm().FeetToMm(),
+                        BottomMm = range?.Bottom.FeetToMm(),
+                        TopMm = range?.Top.FeetToMm(),
                     };
 
                     var duplicate = planes.Any(existing =>
