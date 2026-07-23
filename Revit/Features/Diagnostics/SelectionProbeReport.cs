@@ -50,6 +50,9 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
         /// <summary>How near the top of a column has to be to the underside of a beam to carry it.</summary>
         private const double BearingGapMm = 100;
 
+        /// <summary>How far from an end an opening still counts as belonging to it.</summary>
+        private const double OpeningReachMm = 1500;
+
         /// <summary>Below this the two solids are touching rather than clashing.</summary>
         private const double NegligibleVolume = 1000 / (304.8 * 304.8 * 304.8);
 
@@ -312,11 +315,112 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 ? $", cut {plan.SkewDegrees:0.##} deg off square with the face at {plan.CutPlaneMm:+0.#;-0.#;0}"
                 : ", no cut";
 
-            report.AppendLine($"  decision: move the axis {plan.AxisTravelMm:+0.#;-0.#;0}{cut}");
-            report.AppendLine(Math.Abs(plan.AxisTravelMm) < BeamEndPlan.NegligibleMoveMm
-                ? "  ** agrees with the model **"
-                : $"  ** DISAGREES: the model has this end where it is, the tool would move it " +
-                  $"{plan.AxisTravelMm:0.#} mm **");
+            // An end that gets cut is judged on its axis, which is what the tool writes and the opening
+            // then trims back from. An end left square is judged on the solid, because the tool always
+            // clears the end extension and puts the axis where the material is to stop - so a model
+            // that shortened the same end by setting an extension instead lands in the same place
+            // while its axis sits somewhere else entirely, and reading the axis would call that a
+            // disagreement when the two agree exactly.
+            var travel = plan.NeedsCut ? plan.AxisTravelMm : plan.MoveMm;
+            var carried = geometry.AxisOffsetMm(end);
+
+            report.AppendLine($"  decision: move the {(plan.NeedsCut ? "axis" : "end")} " +
+                              $"{travel:+0.#;-0.#;0}{cut}" +
+                              (Math.Abs(carried) < BeamEndPlan.NegligibleMoveMm
+                                  ? string.Empty
+                                  : $"   (the model's axis stands {carried:+0.#;-0.#;0} from where its " +
+                                    "material stops)"));
+
+            report.AppendLine(Math.Abs(travel) < BeamEndPlan.NegligibleMoveMm
+                ? "  ** agrees on the position **"
+                : $"  ** DISAGREES on the position: the model has this end where it is, the tool " +
+                  $"would move it {travel:0.#} mm **");
+
+            Cuts(report, geometry, end, plan);
+        }
+
+        /// <summary>
+        /// The openings the model already has at this end, against the one the tool would make.
+        ///
+        /// Judging an end on where it sits is only half of it. An end can be in exactly the right
+        /// place and still be wrong, because the tool squared it off with an opening where the model
+        /// simply made the beam shorter - and read on position alone that end passes.
+        /// </summary>
+        private static void Cuts(StringBuilder report, BeamGeometry beam, int end, BeamEndPlan plan)
+        {
+            var origin = beam.PointAt(end);
+            var outward = beam.OutwardAt(end);
+            var across = XYZ.BasisZ.CrossProduct(beam.Direction).Normalize();
+            var reach = OpeningReachMm.MmToFeet();
+
+            var found = new FilteredElementCollector(beam.Beam.Document)
+                .OfClass(typeof(Opening))
+                .Cast<Opening>()
+                .Where(opening => opening.Host != null && opening.Host.Id == beam.Beam.Id)
+                .Select(opening => new { opening, edges = Edges(opening).ToList() })
+                .Where(item => item.edges.Any(edge => edge.Middle.DistanceTo(origin) < reach))
+                .ToList();
+
+            var squaresOff = false;
+
+            foreach (var item in found)
+            {
+                var sideways = item.edges
+                    .SelectMany(edge => new[] { edge.Start, edge.Finish })
+                    .Select(point => (point - origin).DotProduct(across))
+                    .ToList();
+
+                var width = (sideways.Max() - sideways.Min()).FeetToMm();
+                var whole = width >= beam.WidthMm - 1;
+                squaresOff |= whole;
+
+                var planes = item.edges
+                    .Select(edge => Crossing(edge, origin, outward))
+                    .Where(distance => distance.HasValue)
+                    .Select(distance => $"{distance.Value.FeetToMm():+0.#;-0.#;0}")
+                    .ToList();
+
+                report.AppendLine($"  model has opening {item.opening.Id.ToLong()}: " +
+                                  $"{width:0.#} across the beam, " +
+                                  (whole ? "squares the end off" : "a notch, not the width of the beam") +
+                                  (planes.Count == 0 ? string.Empty : ", faces at " + string.Join(" and ", planes)));
+            }
+
+            if (found.Count == 0)
+            {
+                report.AppendLine("  model has no opening at this end");
+            }
+
+            if (plan.NeedsCut == squaresOff)
+            {
+                report.AppendLine(plan.NeedsCut
+                    ? "  ** both square this end off - compare the faces above with the tool's **"
+                    : "  ** both leave this end square **");
+                return;
+            }
+
+            report.AppendLine(plan.NeedsCut
+                ? "  ** DISAGREES on the cut: the tool would square this end off, the model just " +
+                  "made the beam shorter **"
+                : "  ** DISAGREES on the cut: the model squares this end off, the tool would leave " +
+                  "it square **");
+        }
+
+        /// <summary>Where the axis crosses the vertical plane an opening edge cuts on.</summary>
+        private static double? Crossing(Edge2 edge, XYZ origin, XYZ outward)
+        {
+            var normal = XYZ.BasisZ.CrossProduct(edge.Direction);
+            if (normal.IsZeroLength())
+            {
+                return null;
+            }
+
+            normal = normal.Normalize();
+            var denominator = outward.DotProduct(normal);
+
+            return Math.Abs(denominator) < 1e-9
+                ? (double?)null
+                : (edge.Middle - origin).DotProduct(normal) / denominator;
         }
 
         /// <summary>
