@@ -95,6 +95,77 @@ namespace SDSoftware.RevitTest.Extensions
         }
 
         /// <summary>
+        /// How high a face reaches, taken from its own edges. Null when the edges cannot be read.
+        /// A face's origin is one point on it and says nothing about its extent, so anything that has
+        /// to know where a face actually is - rather than where its plane is - has to ask for this.
+        /// </summary>
+        public static (double Bottom, double Top)? ZRange(this Face face)
+        {
+            var bottom = double.MaxValue;
+            var top = double.MinValue;
+
+            foreach (var point in face.BoundaryPoints())
+            {
+                bottom = Math.Min(bottom, point.Z);
+                top = Math.Max(top, point.Z);
+            }
+
+            return bottom > top ? ((double, double)?)null : (bottom, top);
+        }
+
+        /// <summary>
+        /// Points on the boundary of a face. Read from its edges, falling back to a tessellation of
+        /// the face itself: a face whose edges cannot be read would otherwise report no extent at
+        /// all, and a caller filtering on extent would quietly keep everything.
+        /// </summary>
+        public static IEnumerable<XYZ> BoundaryPoints(this Face face)
+        {
+            var found = false;
+
+            foreach (EdgeArray loop in face.EdgeLoops)
+            {
+                foreach (Edge edge in loop)
+                {
+                    IList<XYZ> points;
+                    try
+                    {
+                        points = edge.Tessellate();
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    foreach (var point in points)
+                    {
+                        found = true;
+                        yield return point;
+                    }
+                }
+            }
+
+            if (found)
+            {
+                yield break;
+            }
+
+            Mesh mesh;
+            try
+            {
+                mesh = face.Triangulate();
+            }
+            catch
+            {
+                yield break;
+            }
+
+            for (var index = 0; index < (mesh?.Vertices.Count ?? 0); index++)
+            {
+                yield return mesh.Vertices[index];
+            }
+        }
+
+        /// <summary>
         /// Points of the solids that lie inside a slab, where the slab is any measurement of a point
         /// held between two values. Edges crossing a face of the slab contribute the crossing point.
         ///

@@ -52,7 +52,13 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var support = document.GetElement(new ElementId(against));
             var normal = support == null
                 ? null
-                : SupportProbe.EntryNormal(support, beam.ProbeOriginAt(plan.End), outward);
+                : SupportProbe.EntryNormal(
+                    support,
+                    beam.ProbeOriginAt(plan.End),
+                    outward,
+                    beam.BottomZ,
+                    beam.TopZ,
+                    beam.WidthMm);
 
             if (normal == null)
             {

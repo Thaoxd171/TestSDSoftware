@@ -62,6 +62,18 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// </summary>
         private const double FacingTolerance = 0.5;
 
+        /// <summary>
+        /// How much of the beam's width a face has to stand across before it counts as one the beam
+        /// runs into. Precast walls carry rows of small recesses up their height, and the chamfer on
+        /// one of those - fifteen millimetres wide, a few degrees off the wall face - crosses the beam
+        /// axis nearer than the wall itself does. Left in, it decides both the clearance and the angle
+        /// the end is cut at. It is not what the beam arrives at: the beam arrives at the wall.
+        /// </summary>
+        private const double MinimumEntryShare = 0.10;
+
+        /// <summary>How far a face has to reach into the width the beam sweeps to be in front of it.</summary>
+        private const double InsideToleranceMm = 1;
+
         private static readonly IList<BuiltInCategory> SupportCategories = new List<BuiltInCategory>
         {
             BuiltInCategory.OST_Walls,
@@ -209,14 +221,20 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
             if (isColumn)
             {
-                return MeasurePillar(candidate, neighbour, solids, origin, outward);
+                return MeasurePillar(candidate, neighbour, solids, origin, outward, beam.WidthMm);
             }
 
             var swept = Swept(solids, beam, neighbour, kind, origin, outward);
             candidate.ClearMm = swept.Count == 0 ? (double?)null : swept.Min().FeetToMm();
 
-            var entry = EntryNormal(neighbour, origin, outward);
+            var entryFace = EntryFace(
+                UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ),
+                origin,
+                outward,
+                beam.WidthMm);
+            var entry = entryFace == null ? null : -entryFace.FaceNormal;
             candidate.SkewDegrees = entry == null ? 0 : AngleBetween(outward, entry);
+            candidate.EntryNote = DescribeEntry(entryFace, origin, outward, beam.WidthMm);
 
             // The ray is one line down the middle of the beam, and a support the end merely slips past
             // the corner of is not on it. Worse, an end running out square to its neighbour travels
@@ -368,7 +386,11 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             // running up against the side of another is not parting from it however squarely the two
             // face each other - the one it is leaning on carries straight past, and there is no shared
             // point between them to divide.
-            var entry = EntryNormal(UprightFaces(neighbour.GetSolids()), origin, outward);
+            var entry = EntryNormal(
+                UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ),
+                origin,
+                outward,
+                beam.WidthMm);
             if (entry == null || AngleBetween(entry, otherAxis.Direction) > FacingAxisDegrees)
             {
                 return false;
@@ -437,7 +459,8 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             Element pillar,
             IList<Solid> solids,
             XYZ origin,
-            XYZ outward)
+            XYZ outward,
+            double widthMm)
         {
             if (SpanInPlan(solids, origin, outward) == null)
             {
@@ -453,7 +476,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             }
 
             // The face the beam runs into, already turned to point the way the beam is travelling.
-            var normal = EntryNormal(faces, origin, outward);
+            var entryFace = EntryFace(faces, origin, outward, widthMm);
+            var normal = entryFace == null ? null : -entryFace.FaceNormal;
+            candidate.EntryNote = DescribeEntry(entryFace, origin, outward, widthMm);
             if (normal == null)
             {
                 candidate.RejectionReason = "no face of the pillar looks back at this end";
@@ -491,9 +516,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// cutter asks for it again when it builds the opening.
         /// Null when the support has no upright face facing the beam.
         /// </summary>
-        public static XYZ EntryNormal(Element support, XYZ origin, XYZ outward)
+        public static XYZ EntryNormal(
+            Element support,
+            XYZ origin,
+            XYZ outward,
+            double bottomZ,
+            double topZ,
+            double widthMm)
         {
-            return EntryNormal(UprightFaces(support.GetSolids()), origin, outward);
+            return EntryNormal(UprightFaces(support.GetSolids(), bottomZ, topZ), origin, outward, widthMm);
         }
 
         /// <summary>
@@ -509,16 +540,109 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// beam dwarfs its own end face, and dropping small faces drops the very one the beam is
         /// arriving at.
         /// </summary>
-        private static XYZ EntryNormal(IList<PlanarFace> faces, XYZ origin, XYZ outward)
+        private static XYZ EntryNormal(IList<PlanarFace> faces, XYZ origin, XYZ outward, double widthMm)
         {
-            var entry = faces
+            var entry = EntryFace(faces, origin, outward, widthMm);
+            return entry == null ? null : -entry.FaceNormal;
+        }
+
+        private static PlanarFace EntryFace(
+            IList<PlanarFace> faces,
+            XYZ origin,
+            XYZ outward,
+            double widthMm)
+        {
+            var across = XYZ.BasisZ.CrossProduct(outward);
+            var half = (widthMm / 2).MmToFeet();
+            var least = (widthMm * MinimumEntryShare).MmToFeet();
+            var touching = InsideToleranceMm.MmToFeet();
+
+            return faces
                 .Where(face => face.FaceNormal.DotProduct(outward) < -FacingTolerance)
+                .Where(face => Wide(face, origin, across, half, least, touching))
                 .Select(face => new { face, crossing = Crossing(face, origin, outward) })
                 .Where(item => item.crossing.HasValue)
                 .OrderBy(item => Math.Abs(item.crossing.Value))
+                .Select(item => item.face)
                 .FirstOrDefault();
+        }
 
-            return entry == null ? null : -entry.face.FaceNormal;
+        /// <summary>
+        /// How wide a face is across the beam, and how much of that width falls inside the band the
+        /// beam sweeps. The two answer different questions and both are needed: the width tells a real
+        /// face from a sliver, and it has to be the face's own width, because a beam clipping the
+        /// corner of its neighbour still meets a full sized face. What falls inside the band tells
+        /// whether the face is in front of the beam at all, rather than off to one side of it.
+        /// </summary>
+        /// <summary>Whether a face is broad enough, and near enough sideways, to be the one met.</summary>
+        private static bool Wide(
+            PlanarFace face,
+            XYZ origin,
+            XYZ across,
+            double half,
+            double least,
+            double touching)
+        {
+            if (across.IsZeroLength())
+            {
+                return true;
+            }
+
+            var measure = AcrossBeam(face, origin, across.Normalize(), half);
+            return measure.Wide >= least && measure.Inside > touching;
+        }
+
+        private static (double Wide, double Inside) AcrossBeam(
+            PlanarFace face,
+            XYZ origin,
+            XYZ across,
+            double half)
+        {
+            var least = double.MaxValue;
+            var most = double.MinValue;
+
+            foreach (var point in face.BoundaryPoints())
+            {
+                var value = (point - origin).DotProduct(across);
+                least = Math.Min(least, value);
+                most = Math.Max(most, value);
+            }
+
+            return least > most
+                ? (0, 0)
+                : (most - least, Math.Max(0, Math.Min(most, half) - Math.Max(least, -half)));
+        }
+
+        /// <summary>
+        /// Where the face the skew was read off actually is, in words.
+        /// Temporary: remove with the diagnostic commands before the final submission.
+        /// </summary>
+        private static string DescribeEntry(PlanarFace face, XYZ origin, XYZ outward, double widthMm)
+        {
+            if (face == null)
+            {
+                return "no face of it looks back at this end";
+            }
+
+            var normal = face.FaceNormal;
+            var crossing = Crossing(face, origin, outward);
+            var range = face.ZRange();
+
+            var height = range == null
+                ? "height unknown"
+                : $"z {range.Value.Bottom.FeetToMm():0.#} to {range.Value.Top.FeetToMm():0.#}";
+
+            var where = crossing == null ? "never crosses" : $"crosses at {crossing.Value.FeetToMm():0.#}";
+
+            var across = XYZ.BasisZ.CrossProduct(outward);
+            var measure = across.IsZeroLength()
+                ? (Wide: 0d, Inside: 0d)
+                : AcrossBeam(face, origin, across.Normalize(), (widthMm / 2).MmToFeet());
+
+            return $"off face ({normal.X:0.###}, {normal.Y:0.###}, {normal.Z:0.###}), "
+                   + $"{where}, {height}, {measure.Wide.FeetToMm():0.#} wide across, "
+                   + $"{measure.Inside.FeetToMm():0.#} of it inside the {widthMm:0.#} the beam sweeps, "
+                   + $"area {face.Area.FeetToMm().FeetToMm():0} mm2";
         }
 
         private static IList<PlanarFace> UprightFaces(IEnumerable<Solid> solids)
@@ -527,6 +651,23 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 .SelectMany(solid => solid.Faces.Cast<Face>())
                 .OfType<PlanarFace>()
                 .Where(face => Math.Abs(face.FaceNormal.Z) < UprightTolerance)
+                .ToList();
+        }
+
+        /// <summary>
+        /// The upright faces standing at the height the beam occupies. A face lying wholly above or
+        /// below the beam is one the beam can never touch, so it cannot be the face the beam arrives
+        /// at - and its plane, extended, would otherwise be free to cross the axis nearer than the
+        /// real face and win. Small chamfer strips along the foot of a wall do exactly that.
+        /// </summary>
+        private static IList<PlanarFace> UprightFaces(IEnumerable<Solid> solids, double bottomZ, double topZ)
+        {
+            return UprightFaces(solids)
+                .Where(face =>
+                {
+                    var range = face.ZRange();
+                    return range == null || (range.Value.Top >= bottomZ && range.Value.Bottom <= topZ);
+                })
                 .ToList();
         }
 
