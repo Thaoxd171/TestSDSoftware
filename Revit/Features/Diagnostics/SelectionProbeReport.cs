@@ -133,7 +133,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 Section(report, "WHAT EACH END BEARS ON", () => Bearing(report, beams, columns));
                 Section(report, "END AGAINST END", () => EndPairs(report, beams, columns));
                 Section(report, "WHERE THE SOLIDS CLASH", () => Clashes(report, beams));
-                Section(report, "HOW THE PIECES SIT", () => Joint(report, beams, columns, openings));
+                Section(report, "HOW THE PIECES SIT", () => Joint(report, beams, columns, openings, others));
             }
             else
             {
@@ -891,7 +891,12 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
         /// The section the rest of the report exists for: every beam end measured against everything
         /// around it, and every opening measured against the faces it might have been cut parallel to.
         /// </summary>
-        private static void Joint(StringBuilder report, IList<Part> beams, IList<Part> columns, IList<Part> openings)
+        private static void Joint(
+            StringBuilder report,
+            IList<Part> beams,
+            IList<Part> columns,
+            IList<Part> openings,
+            IList<Part> others)
         {
             foreach (var beam in beams.Where(beam => beam.Axis != null))
             {
@@ -905,7 +910,11 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                                       $"{Mm(beam.PointAt(end))}, running out {Vec(outward)}");
                     report.AppendLine($"  measured at height {beam.ProbeZ.FeetToMm():0.#}");
 
-                    foreach (var other in columns.Concat(beams).Concat(openings)
+                    // Walls are in here with everything else. They were left out at first because a
+                    // beam's neighbours are mostly columns and beams, and a wall's plane crossings are
+                    // the one reading that says whether the model lets an end run into a wall or holds
+                    // it off - which is exactly the question a wall raises.
+                    foreach (var other in columns.Concat(beams).Concat(openings).Concat(others)
                                  .Where(other => other.Element.Id != beam.Element.Id))
                     {
                         AgainstFaces(report, origin, outward, beam.Direction, other);
