@@ -77,8 +77,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         private static CurveArray Profile(BeamGeometry beam, BeamEndPlan plan, XYZ planePoint, XYZ normal)
         {
             var across = XYZ.BasisZ.CrossProduct(normal).Normalize();
-            var half = (beam.WidthMm / 2 + SideMarginMm).MmToFeet();
-            var depth = (beam.WidthMm * Math.Tan(plan.SkewDegrees * Math.PI / 180) + AlongMarginMm).MmToFeet();
+            var skew = plan.SkewDegrees * Math.PI / 180;
+
+            // The width is measured across the beam, but the opening is laid out along the cut plane,
+            // and a plane meeting the beam at an angle sees a wider section than the beam really is.
+            // Take the width as it stands and the cut falls short at both corners, leaving the two
+            // spikes the wedge was supposed to take off - and the further from square the end is, the
+            // further short it falls, so it is the very ends most in need of trimming that keep them.
+            var half = (beam.WidthMm / 2 / Math.Cos(skew) + SideMarginMm).MmToFeet();
+            var depth = (beam.WidthMm * Math.Tan(skew) + AlongMarginMm).MmToFeet();
 
             var origin = new XYZ(planePoint.X, planePoint.Y, beam.MiddleZ);
             var corners = new[]
