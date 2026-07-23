@@ -64,12 +64,16 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
         /// <summary>
         /// How much of the beam's width a face has to stand across before it counts as one the beam
-        /// runs into. Precast walls carry rows of small recesses up their height, and the chamfer on
-        /// one of those - fifteen millimetres wide, a few degrees off the wall face - crosses the beam
-        /// axis nearer than the wall itself does. Left in, it decides both the clearance and the angle
-        /// the end is cut at. It is not what the beam arrives at: the beam arrives at the wall.
+        /// runs into. Precast walls carry rows of small recesses up their height, and one of those
+        /// always lands at the depth a beam runs at. Its faces cross the beam axis nearer than the
+        /// wall itself does, so left in they decide both the clearance and the angle the end is cut
+        /// at. They are not what the beam arrives at: the beam arrives at the wall.
+        ///
+        /// A fifth is where the two kinds separate. The recess faces measure 14 per cent of the beam
+        /// width at their widest; the narrowest face a beam has actually been found to meet is the
+        /// end of a 180 mm wall met at an angle, at 25 per cent.
         /// </summary>
-        private const double MinimumEntryShare = 0.10;
+        private const double MinimumEntryShare = 0.20;
 
         /// <summary>How far a face has to reach into the width the beam sweeps to be in front of it.</summary>
         private const double InsideToleranceMm = 1;
@@ -159,6 +163,25 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return null;
         }
 
+        /// <summary>
+        /// Whether the beam runs over this wall rather than up against it. A precast beam lands on a
+        /// wall built up to its bearing level and carries straight on over it; a wall carried up past
+        /// the beam's web is something else entirely, an obstruction the end has to stop short of.
+        /// The two are told apart by how high the wall reaches, because nothing else tells them apart:
+        /// at this joint a wall the beam runs 168 mm into and a wall it is held 20 mm clear of give
+        /// the same reading for where their faces are and where their material starts, and differ only
+        /// in that one stops at the top of the bearing block and the other carries on to the top of
+        /// the beam.
+        ///
+        /// Half the depth is the line, being the roundest one there is. The four walls this was read
+        /// off sit at 470 and 416 mm below the beam top on the bearing side and 60 mm on the other,
+        /// against a half depth of 385.
+        /// </summary>
+        private static bool SitsOver(SupportCandidate wall, BeamGeometry beam)
+        {
+            return wall.TopAboveBeamMm < -(beam.TopZ - beam.BottomZ).FeetToMm() / 2;
+        }
+
         /// <summary>Top and bottom of an element, measured up from the top of the beam.</summary>
         private static (double Top, double Bottom) HeightAboveBeam(Element neighbour, BeamGeometry beam)
         {
@@ -224,6 +247,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 return MeasurePillar(candidate, neighbour, solids, origin, outward, beam.WidthMm);
             }
 
+            if (kind == SupportKind.Wall && SitsOver(candidate, beam))
+            {
+                var depth = (beam.TopZ - beam.BottomZ).FeetToMm();
+                candidate.RejectionReason =
+                    $"its top stops {-candidate.TopAboveBeamMm:0.#} mm below the top of the beam, less " +
+                    $"than half its {depth:0.#} depth, so the beam sits over it rather than up against it";
+                return candidate;
+            }
+
             var swept = Swept(solids, beam, neighbour, kind, origin, outward);
             candidate.ClearMm = swept.Count == 0 ? (double?)null : swept.Min().FeetToMm();
 
@@ -234,6 +266,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 beam.WidthMm);
             var entry = entryFace == null ? null : -entryFace.FaceNormal;
             candidate.SkewDegrees = entry == null ? 0 : AngleBetween(outward, entry);
+            candidate.EntryFaceMm = entryFace == null
+                ? (double?)null
+                : Crossing(entryFace, origin, outward)?.FeetToMm();
             candidate.EntryNote = DescribeEntry(entryFace, origin, outward, beam.WidthMm);
 
             // The ray is one line down the middle of the beam, and a support the end merely slips past

@@ -212,10 +212,16 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             {
                 // Cleared, the option stops the end at the wall rather than letting it run over the
                 // wall to reach the beam beyond.
+                //
+                // Held off the face the end arrives at, not off the nearest material. A beam coming at
+                // the end of a wall from the side is already past the plane of that end face while the
+                // wall's body is still ahead, and it is the face it has to clear: the end is set
+                // parallel to it and stood off it, exactly as it is at any other wall. The two readings
+                // agree wherever a beam runs squarely into a wall, which is most of them.
                 limits.Add(new BeamEndLimit
                 {
                     Support = wall,
-                    TargetMm = wall.NearMm - AlongAxis(options.WallClearanceMm, wall),
+                    TargetMm = (wall.EntryFaceMm ?? wall.NearMm) - AlongAxis(options.WallClearanceMm, wall),
                     SkewDegrees = wall.SkewDegrees,
                     CutAgainstId = wall.Id,
                     Dropped = options.ExtendToBeamBodyAtWall && crossings > 0,

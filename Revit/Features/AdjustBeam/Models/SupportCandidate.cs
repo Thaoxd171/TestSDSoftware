@@ -33,6 +33,17 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         public double? CentreAlongMm { get; set; }
 
         /// <summary>
+        /// Where the axis crosses the plane of the face the beam arrives at. This is not the same as
+        /// <see cref="NearMm"/>, which says where the support's material first stands in the width the
+        /// beam sweeps. The two agree whenever a beam runs squarely into something, and part company
+        /// when it comes at the end of a wall from the side: the beam is then already past the plane of
+        /// that end face while the wall's body is still ahead of it. Clearances are held off the face,
+        /// because the face is what the end is set parallel to and what it has to stand clear of.
+        /// Null when no face of the support looks back at this end.
+        /// </summary>
+        public double? EntryFaceMm { get; set; }
+
+        /// <summary>
         /// Angle between the beam axis and the face of the support it meets, where 0 means the beam
         /// arrives square. Clearances are measured across that face, so a skewed beam has to travel a
         /// little further along its own axis to keep the same gap - and its square-cut end no longer
