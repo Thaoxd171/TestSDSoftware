@@ -38,6 +38,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>How far the corner of a face may miss the corner the beam reaches and still count.</summary>
         private const double ContactToleranceMm = 1;
 
+        /// <summary>How near two limits have to be before they count as putting the end in one place.</summary>
+        private const double TieToleranceMm = 1;
+
         /// <param name="axisOffsetMm">
         /// How far the location line already runs past where the solid stops at this end. Nought on a
         /// plain end; on one that has been cut it is what the axis has already travelled, and leaving
@@ -123,10 +126,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             double beamWidthMm)
         {
             var found = Collect(supports, options, beamWidthMm).ToList();
-            var governing = found.FirstOrDefault(limit => limit.Settles)
-                            ?? found.Where(limit => !limit.Dropped)
-                                .OrderBy(limit => limit.TargetMm)
-                                .FirstOrDefault();
+            var governing = found.FirstOrDefault(limit => limit.Settles) ?? Nearest(found);
 
             foreach (var limit in found)
             {
@@ -134,6 +134,34 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             }
 
             return found;
+        }
+
+        /// <summary>
+        /// The limit that holds the end back the most, and where several hold it to the same place,
+        /// the one that asks the least of it.
+        ///
+        /// Limits agreeing to within a millimetre are not disagreeing at all, and choosing between
+        /// them on a tenth of one is choosing on noise - while what they ask for differs in kind, one
+        /// leaving the end square and the other squaring it off with an opening. A beam bearing on a
+        /// corbel that juts from a wall meets both at once, and the corbel it sits on is square to it
+        /// where the wall behind is a few degrees off; letting the wall win by a tenth of a millimetre
+        /// puts an angled cut on an end that wants none.
+        /// </summary>
+        private static BeamEndLimit Nearest(IEnumerable<BeamEndLimit> found)
+        {
+            var live = found.Where(limit => !limit.Dropped).ToList();
+            if (live.Count == 0)
+            {
+                return null;
+            }
+
+            var nearest = live.Min(limit => limit.TargetMm);
+
+            return live
+                .Where(limit => limit.TargetMm <= nearest + TieToleranceMm)
+                .OrderBy(limit => limit.SkewDegrees > SquareEnoughDegrees ? 1 : 0)
+                .ThenBy(limit => limit.TargetMm)
+                .First();
         }
 
         private static IList<BeamEndLimit> Collect(
