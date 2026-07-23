@@ -72,6 +72,11 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                     continue;
                 }
 
+                if (TheirsToGiveUp(section, beam, neighbour, clash))
+                {
+                    continue;
+                }
+
                 foreach (var side in new[] { 1, -1 })
                 {
                     if (!section.HasBlock(side))
@@ -88,6 +93,78 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             }
 
             return notes;
+        }
+
+        /// <summary>
+        /// Whether it is the other beam's bearing that has to go rather than this one's.
+        ///
+        /// Two blocks in the same place is one clash, and cutting either of them clears it - cutting
+        /// both throws away bearing for nothing. The one to lose it is the beam that pushed into the
+        /// joint, and the longer of the two cuts is the mark of it: the further a beam has driven in,
+        /// the greater the stretch of it the other one crosses.
+        ///
+        /// Read off a single joint. It matches the reference model and what it was built to do, but
+        /// one example is one example, and a second would be worth having.
+        /// </summary>
+        private static bool TheirsToGiveUp(
+            BeamSection section,
+            Element beam,
+            Element neighbour,
+            IList<XYZ> clash)
+        {
+            var theirs = BeamSection.Read(neighbour);
+            if (theirs == null)
+            {
+                return false;
+            }
+
+            var mine = BlockSpan(section, clash);
+            var yours = BlockSpan(theirs, clash);
+
+            if (!mine.HasValue || !yours.HasValue)
+            {
+                return false;
+            }
+
+            // Dead level, the lower id keeps its bearing - any settled answer will do, so long as the
+            // two beams never both stand aside and leave the clash uncut.
+            return Math.Abs(yours.Value - mine.Value) < GeometryExtensions.Tolerance
+                ? beam.Id.ToLong() > neighbour.Id.ToLong()
+                : yours.Value > mine.Value;
+        }
+
+        /// <summary>How much of a beam's bearing block the clash takes up, along the beam.</summary>
+        private static double? BlockSpan(BeamSection section, IList<XYZ> clash)
+        {
+            var step = BeamSection.StepMm.MmToFeet();
+            double? longest = null;
+
+            foreach (var side in new[] { 1, -1 })
+            {
+                var web = section.Web(side);
+                if (!web.HasValue || !section.HasBlock(side))
+                {
+                    continue;
+                }
+
+                var inside = clash
+                    .Where(point => section.Across(point, side) > web.Value + step)
+                    .Select(section.Along)
+                    .ToList();
+
+                if (inside.Count == 0)
+                {
+                    continue;
+                }
+
+                var span = inside.Max() - inside.Min();
+                if (!longest.HasValue || span > longest.Value)
+                {
+                    longest = span;
+                }
+            }
+
+            return longest;
         }
 
         /// <summary>Cuts one side back, or returns null when the clash is not on that side.</summary>

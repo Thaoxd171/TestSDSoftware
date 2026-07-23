@@ -54,11 +54,13 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>Two normals count as the same axis this close to one.</summary>
         private const double ParallelTolerance = 0.02;
 
-        /// <summary>How squarely a face has to look back at the beam to count as the one it meets.</summary>
-        private const double FacingTolerance = 0.05;
-
-        /// <summary>How much of the largest facing face a face must have before it counts as one.</summary>
-        private const double MinorFaceFraction = 0.2;
+        /// <summary>
+        /// How squarely a face has to look back at the beam to count as one it runs into. Half is
+        /// sixty degrees off square: past that the face lies more alongside the beam than across it,
+        /// and the beam slides along it rather than meeting it. Squaring an end up to such a face
+        /// would take a wedge off it longer than the beam is wide.
+        /// </summary>
+        private const double FacingTolerance = 0.5;
 
         private static readonly IList<BuiltInCategory> SupportCategories = new List<BuiltInCategory>
         {
@@ -125,9 +127,14 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             }
 
             // A column stays in play even once the beam has passed over it: its centre is the point two
-            // beams share and its outer face is as far as the beam may hang out. A wall or another beam
-            // is done with as soon as the end is clear of it.
-            if (candidate.Kind != SupportKind.Pillar && candidate.FarMm <= 0)
+            // beams share and its outer face is as far as the beam may hang out. So does the beam this
+            // end is parting from - two ends that have run through each other are the very thing most
+            // in need of setting right, and dropping the partner for being behind leaves the end with
+            // nothing in front of it and no reason to come back. A wall, or a beam merely crossing this
+            // one, is done with as soon as the end is clear of it.
+            if (candidate.Kind != SupportKind.Pillar
+                && candidate.Kind != SupportKind.InlineBeam
+                && candidate.FarMm <= 0)
             {
                 return $"ends {-candidate.FarMm:0.#} mm behind this end, the beam is already clear of it";
             }
@@ -176,7 +183,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             XYZ outward,
             Line ray)
         {
-            var kind = Classify(beam, neighbour, end);
+            var kind = Classify(beam, neighbour, end, origin, outward);
             if (kind == SupportKind.None)
             {
                 return null;
@@ -205,29 +212,63 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 return MeasurePillar(candidate, neighbour, solids, origin, outward);
             }
 
-            var span = SpanAlongRay(solids, ray, origin, outward);
-            if (span == null)
-            {
-                candidate.RejectionReason = "the beam axis does not run into it";
-                return candidate;
-            }
-
-            candidate.NearMm = span.Value.Near.FeetToMm();
-            candidate.FarMm = span.Value.Far.FeetToMm();
-            candidate.ClearMm = Clearance(solids, beam, neighbour, kind, origin, outward)?.FeetToMm();
+            var swept = Swept(solids, beam, neighbour, kind, origin, outward);
+            candidate.ClearMm = swept.Count == 0 ? (double?)null : swept.Min().FeetToMm();
 
             var entry = EntryNormal(neighbour, origin, outward);
             candidate.SkewDegrees = entry == null ? 0 : AngleBetween(outward, entry);
 
+            // The ray is one line down the middle of the beam, and a support the end merely slips past
+            // the corner of is not on it. Worse, an end running out square to its neighbour travels
+            // parallel to that neighbour's end face and never crosses it at all, however close it
+            // passes. Where the ray finds nothing, the face the end is arriving at says where the
+            // support starts and the width the beam sweeps says where it ends.
+            //
+            // The face, not the nearest speck of material: the two part company on a face that stops
+            // inside the beam's width, and telling those apart is the whole point of having both.
+            var span = SpanAlongRay(solids, ray, origin, outward);
+            if (span == null && swept.Count > 0 && entry != null)
+            {
+                var denominator = outward.DotProduct(entry);
+                if (Math.Abs(denominator) > GeometryExtensions.Tolerance)
+                {
+                    span = (Facing(solids, entry, origin, outward), swept.Max());
+                }
+            }
+
+            if (span == null)
+            {
+                candidate.RejectionReason = "nothing of it stands in the width the beam sweeps";
+                return candidate;
+            }
+
+            candidate.NearMm = span.Value.Item1.FeetToMm();
+            candidate.FarMm = span.Value.Item2.FeetToMm();
+
             return candidate;
         }
 
+        /// <summary>Where the axis crosses the plane of the face the end is arriving at.</summary>
+        private static double Facing(IList<Solid> solids, XYZ entry, XYZ origin, XYZ outward)
+        {
+            var plane = solids
+                .SelectMany(solid => solid.Faces.Cast<Face>())
+                .OfType<PlanarFace>()
+                .Where(face => Math.Abs(face.FaceNormal.DotProduct(entry) + 1) < ParallelTolerance)
+                .Select(face => Crossing(face, origin, outward))
+                .Where(crossing => crossing.HasValue)
+                .Select(crossing => crossing.Value)
+                .ToList();
+
+            return plane.Count == 0 ? 0 : plane.OrderBy(Math.Abs).First();
+        }
+
         /// <summary>
-        /// The closest the support's material comes to this end, measured along the beam axis and
-        /// counting only what stands inside the width and the height the beam sweeps. The face
-        /// crossing says where the plane of a face is; this says where the beam would actually touch.
+        /// Where the support's material sits along the beam axis, counting only what stands inside the
+        /// width and the height the beam sweeps. The face crossing says where the plane of a face is;
+        /// this says where the beam would actually touch.
         /// </summary>
-        private static double? Clearance(
+        private static IList<double> Swept(
             IList<Solid> solids,
             BeamGeometry beam,
             Element neighbour,
@@ -238,32 +279,35 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var across = XYZ.BasisZ.CrossProduct(outward);
             if (across.IsZeroLength())
             {
-                return null;
+                return new List<double>();
             }
 
             across = across.Normalize();
             var half = (beam.WidthMm / 2).MmToFeet();
 
-            // The bearing block on the end of another beam is not something to stand clear of - it is
-            // cut back to let this beam through - so the clearance is taken from the web behind it.
-            // Measure against the block instead and the two beams chase each other: back away from the
-            // block and the cut made for it shrinks, putting the block back in the way.
+            // The widened foot of another beam is not something to stand clear of - it is cut back to
+            // let this beam through - so the clearance is taken from the web behind it. Measure against
+            // the foot instead and the two beams chase each other: back away from it and the cut made
+            // for it shrinks, putting it back in the way.
             var section = kind == SupportKind.CrossingBeam || kind == SupportKind.InlineBeam
                 ? BeamSection.Read(neighbour)
                 : null;
 
-            var distances = solids
+            return solids
                 .PointsInSlab(point => (point - origin).DotProduct(across), -half, half)
                 .Where(point => point.Z >= beam.BottomZ && point.Z <= beam.TopZ)
                 .Where(point => section == null || !section.IsBeyondWeb(point))
                 .Select(point => (point - origin).DotProduct(outward))
                 .ToList();
-
-            return distances.Count == 0 ? (double?)null : distances.Min();
         }
 
         /// <summary>What kind of support this element is for that beam, or None when it is not one.</summary>
-        private static SupportKind Classify(BeamGeometry beam, Element neighbour, int end)
+        private static SupportKind Classify(
+            BeamGeometry beam,
+            Element neighbour,
+            int end,
+            XYZ origin,
+            XYZ outward)
         {
             if (neighbour is Wall)
             {
@@ -296,7 +340,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 return SupportKind.InlineBeam;
             }
 
-            return FaceToFace(beam, end, otherAxis) ? SupportKind.InlineBeam : SupportKind.CrossingBeam;
+            return FaceToFace(beam, end, neighbour, otherAxis, origin, outward)
+                ? SupportKind.InlineBeam
+                : SupportKind.CrossingBeam;
         }
 
         /// <summary>
@@ -305,9 +351,25 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// on one line; an end that meets the flank of another beam is not, however nearly parallel
         /// the two happen to run.
         /// </summary>
-        private static bool FaceToFace(BeamGeometry beam, int end, Line otherAxis)
+        private static bool FaceToFace(
+            BeamGeometry beam,
+            int end,
+            Element neighbour,
+            Line otherAxis,
+            XYZ origin,
+            XYZ outward)
         {
             if (AngleBetween(beam.Direction, otherAxis.Direction) > FacingAxisDegrees)
+            {
+                return false;
+            }
+
+            // The face this end arrives at has to be the other beam's end, not its flank. A beam
+            // running up against the side of another is not parting from it however squarely the two
+            // face each other - the one it is leaning on carries straight past, and there is no shared
+            // point between them to divide.
+            var entry = EntryNormal(UprightFaces(neighbour.GetSolids()), origin, outward);
+            if (entry == null || AngleBetween(entry, otherAxis.Direction) > FacingAxisDegrees)
             {
                 return false;
             }
@@ -391,7 +453,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             }
 
             // The face the beam runs into, already turned to point the way the beam is travelling.
-            var normal = EntryNormal(faces, outward);
+            var normal = EntryNormal(faces, origin, outward);
             if (normal == null)
             {
                 candidate.RejectionReason = "no face of the pillar looks back at this end";
@@ -431,35 +493,32 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// </summary>
         public static XYZ EntryNormal(Element support, XYZ origin, XYZ outward)
         {
-            return EntryNormal(UprightFaces(support.GetSolids()), outward);
+            return EntryNormal(UprightFaces(support.GetSolids()), origin, outward);
         }
 
         /// <summary>
         /// The face a beam running this way meets most squarely, as a normal pointing along the beam.
         ///
-        /// Slivers are dropped before choosing. A precast column is chamfered at every corner, and a
-        /// 10 mm chamfer stands more squarely across a beam arriving at an angle than the face the beam
-        /// is really landing on - so going by squareness alone would line the end up with the corner.
+        /// The nearest one wins. Squareness is no guide: a beam running past the flank of another meets
+        /// its long side first and its end face second, and the end face - being the squarer of the two
+        /// - would be chosen although the beam never comes near it.
+        ///
+        /// Nearness alone is enough. A chamfer on the corner of a column is cut back off the corner, so
+        /// it always crosses the axis further out than the face it was cut from, and it loses without
+        /// having to be sifted out by size. Sifting by size is worse than useless here: the flank of a
+        /// beam dwarfs its own end face, and dropping small faces drops the very one the beam is
+        /// arriving at.
         /// </summary>
-        private static XYZ EntryNormal(IList<PlanarFace> faces, XYZ outward)
+        private static XYZ EntryNormal(IList<PlanarFace> faces, XYZ origin, XYZ outward)
         {
-            var facing = faces
+            var entry = faces
                 .Where(face => face.FaceNormal.DotProduct(outward) < -FacingTolerance)
-                .ToList();
+                .Select(face => new { face, crossing = Crossing(face, origin, outward) })
+                .Where(item => item.crossing.HasValue)
+                .OrderBy(item => Math.Abs(item.crossing.Value))
+                .FirstOrDefault();
 
-            if (facing.Count == 0)
-            {
-                return null;
-            }
-
-            var biggest = facing.Max(face => face.Area);
-
-            var entry = facing
-                .Where(face => face.Area >= biggest * MinorFaceFraction)
-                .OrderBy(face => face.FaceNormal.DotProduct(outward))
-                .First();
-
-            return -entry.FaceNormal;
+            return entry == null ? null : -entry.face.FaceNormal;
         }
 
         private static IList<PlanarFace> UprightFaces(IEnumerable<Solid> solids)
