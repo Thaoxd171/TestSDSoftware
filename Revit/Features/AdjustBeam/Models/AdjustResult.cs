@@ -32,6 +32,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         /// <summary>Openings created to square off skewed ends.</summary>
         public int CutsCreated { get; set; }
 
+        /// <summary>Cuts the solver asked for that the cutter could not make. Should always be zero.</summary>
+        public int CutsRefused { get; set; }
+
         /// <summary>Openings created to take a bearing block out of a crossing beam's way.</summary>
         public int NotchesCreated { get; set; }
 
@@ -46,6 +49,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
             $"{BeamsExamined} beams, {EndsAlreadyCorrect} already correct, {EndsSkipped} left alone." +
             (CutsCreated > 0 ? $" {CutsCreated} skewed end(s) squared off with an opening." : string.Empty) +
             (NotchesCreated > 0 ? $" {NotchesCreated} bearing block(s) cut back." : string.Empty) +
+            (CutsRefused > 0 ? $" WARNING: {CutsRefused} skewed end(s) were left uncut." : string.Empty) +
             (EndsOffTarget > 0 ? $" WARNING: {EndsOffTarget} did not end up where they were sent." : string.Empty) +
             (DidNotSettle ? " WARNING: the ends were still moving when the rounds ran out." : string.Empty);
 
@@ -62,6 +66,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
             EndsAlreadyCorrect = 0;
             EndsSkipped = 0;
             CutsCreated = 0;
+            CutsRefused = 0;
             NotchesCreated = 0;
         }
     }

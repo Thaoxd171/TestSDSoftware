@@ -44,25 +44,28 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return openings.Count;
         }
 
-        /// <summary>Cuts the wedge off one end. Returns true when an opening was created.</summary>
-        public static bool Cut(Document document, BeamGeometry beam, BeamEndPlan plan)
+        /// <summary>
+        /// Cuts the wedge off one end. Returns null when the opening was made, or why it was not:
+        /// a cut the solver asked for and the cutter dropped has to be said out loud, because the end
+        /// then keeps the wedge the whole run was for and nothing else in the log would show it.
+        /// </summary>
+        public static string Cut(Document document, BeamGeometry beam, BeamEndPlan plan)
         {
             var outward = beam.OutwardAt(plan.End);
             var against = plan.CutAgainstId == 0 ? plan.SupportId : plan.CutAgainstId;
             var support = document.GetElement(new ElementId(against));
-            var normal = support == null
-                ? null
-                : SupportProbe.EntryNormal(
-                    support,
-                    beam.ProbeOriginAt(plan.End),
-                    outward,
-                    beam.BottomZ,
-                    beam.TopZ,
-                    beam.WidthMm);
+
+            if (support == null)
+            {
+                return $"the support it is cut against (id {against}) is not in the model";
+            }
+
+            var normal = SupportProbe.EntryNormal(
+                support, beam.ProbeOriginAt(plan.End), outward, beam.WidthMm);
 
             if (normal == null)
             {
-                return false;
+                return $"no face of id {against} looks back at this end to cut parallel to";
             }
 
             // A point on the finished end face, sitting on the axis.
@@ -72,7 +75,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 beam.Beam,
                 Profile(beam, plan, planePoint, normal),
                 Autodesk.Revit.Creation.eRefFace.CenterZ);
-            return true;
+            return null;
         }
 
         /// <summary>

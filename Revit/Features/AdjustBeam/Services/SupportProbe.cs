@@ -516,15 +516,13 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// cutter asks for it again when it builds the opening.
         /// Null when the support has no upright face facing the beam.
         /// </summary>
-        public static XYZ EntryNormal(
-            Element support,
-            XYZ origin,
-            XYZ outward,
-            double bottomZ,
-            double topZ,
-            double widthMm)
+        public static XYZ EntryNormal(Element support, XYZ origin, XYZ outward, double widthMm)
         {
-            return EntryNormal(UprightFaces(support.GetSolids(), bottomZ, topZ), origin, outward, widthMm);
+            // No height band here, unlike the measuring above. This asks which plane a finished end is
+            // cut parallel to, and the answer is often a corbel pillar, which by design stops where the
+            // beam begins and stands entirely below it. Judging that face by whether it reaches the
+            // beam's own depth throws away every pillar there is, and the cut is quietly never made.
+            return EntryNormal(UprightFaces(support.GetSolids()), origin, outward, widthMm);
         }
 
         /// <summary>

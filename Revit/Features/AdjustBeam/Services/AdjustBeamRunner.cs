@@ -345,11 +345,19 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         {
             try
             {
-                if (BeamEndCutter.Cut(_document, plan.Geometry, end))
+                var refused = BeamEndCutter.Cut(_document, plan.Geometry, end);
+
+                if (refused == null)
                 {
                     result.CutsCreated++;
                     progress.Log($"id {end.BeamId} end {end.End}: cut square to {Describe(end)}, " +
                                  $"{end.SkewDegrees:0.##} deg off, face at {end.CutPlaneMm:+0.#;-0.#;0} mm");
+                }
+                else
+                {
+                    result.CutsRefused++;
+                    progress.Log($"id {end.BeamId} end {end.End}: NOT cut although it wanted a " +
+                                 $"{end.SkewDegrees:0.##} deg cut at {end.CutPlaneMm:+0.#;-0.#;0} mm - {refused}");
                 }
             }
             catch (Exception ex)
