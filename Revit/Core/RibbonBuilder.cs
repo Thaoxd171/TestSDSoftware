@@ -88,6 +88,16 @@ namespace SDSoftware.RevitTest.Core
                                  "end would move to. The model is not touched.",
                 iconFile: "AdjustBeam");
 
+            AddButton<SelectionProbeCmd>(
+                diagnostics,
+                name: "SelectionProbe",
+                text: "Selection\nProbe",
+                tooltip: "Report everything about the selected elements and how they sit together (read-only).",
+                longDescription: "Select the pieces first - an opening, the beam it cuts, the column beside " +
+                                 "it - then run this. Lists geometry, parameters and, for every pair, the " +
+                                 "parallel faces with the gap between them.",
+                iconFile: "ModelProbe");
+
             AddButton<ResetGeneratedCmd>(
                 diagnostics,
                 name: "ResetGenerated",
