@@ -5,6 +5,8 @@ using System.Text;
 using Autodesk.Revit.DB;
 using Autodesk.Revit.DB.Structure;
 using SDSoftware.RevitTest.Extensions;
+using SDSoftware.RevitTest.Features.AdjustBeam.Models;
+using SDSoftware.RevitTest.Features.AdjustBeam.Services;
 using static SDSoftware.RevitTest.Features.Diagnostics.ProbeFormat;
 
 namespace SDSoftware.RevitTest.Features.Diagnostics
@@ -33,6 +35,23 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
         private const int MaxFaces = 12;
 
         private const int MaxPairLines = 20;
+
+        /// <summary>
+        /// What the tool asks of two ends before it treats them as parting from a shared point. Copied
+        /// from the probe on purpose: the report is here to be compared against the tool's answer, and
+        /// a reading taken under different terms could not be.
+        /// </summary>
+        private const double FacingAxisDegrees = 45;
+
+        private const double FacingApartDegrees = 135;
+
+        private const double FacingReachMm = 1000;
+
+        /// <summary>How near the top of a column has to be to the underside of a beam to carry it.</summary>
+        private const double BearingGapMm = 100;
+
+        /// <summary>Below this the two solids are touching rather than clashing.</summary>
+        private const double NegligibleVolume = 1000 / (304.8 * 304.8 * 304.8);
 
         public static string Build(Document document, IList<Element> elements)
         {
@@ -86,6 +105,10 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             if (beams.Count > 0 || columns.Count > 0)
             {
+                Section(report, "WHAT THE TOOL WOULD DECIDE", () => Decide(report, document, beams));
+                Section(report, "WHAT EACH END BEARS ON", () => Bearing(report, beams, columns));
+                Section(report, "END AGAINST END", () => EndPairs(report, beams, columns));
+                Section(report, "WHERE THE SOLIDS CLASH", () => Clashes(report, beams));
                 Section(report, "HOW THE PIECES SIT", () => Joint(report, beams, columns, openings));
             }
             else
@@ -156,7 +179,422 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             report.AppendLine($"join      : allowed at start {JoinAllowed(instance, 0)}   " +
                               $"at end {JoinAllowed(instance, 1)}");
 
+            DumpFlanks(report, beam);
             DumpUprights(report, beam);
+        }
+
+        /// <summary>
+        /// Where each flank of the beam steps out. A precast beam is widened at its ends into a bearing
+        /// block, and the two numbers that follow decide most of what happens at a joint: clearances
+        /// are taken from the web, and the block is what gets cut back.
+        /// </summary>
+        private static void DumpFlanks(StringBuilder report, Part beam)
+        {
+            report.AppendLine();
+            report.AppendLine("section, measured out from the axis:");
+
+            if (beam.Section == null)
+            {
+                report.AppendLine("  (not readable)");
+                return;
+            }
+
+            foreach (var side in new[] { 1, -1 })
+            {
+                var web = beam.Section.Web(side);
+                var flange = beam.Section.Flange(side);
+                var name = side > 0 ? "left " : "right";
+
+                if (!web.HasValue)
+                {
+                    report.AppendLine($"  {name}: (no face on this side)");
+                    continue;
+                }
+
+                var step = (flange.Value - web.Value).FeetToMm();
+                report.AppendLine($"  {name}: web at {web.Value.FeetToMm():0.#}   " +
+                                  $"outermost at {flange.Value.FeetToMm():0.#}   " +
+                                  (beam.Section.HasBlock(side)
+                                      ? $"steps out {step:0.#}"
+                                      : "runs straight"));
+
+                var wide = beam.Widened(side).ToList();
+                if (wide.Count == 0)
+                {
+                    continue;
+                }
+
+                var along = wide.Select(beam.Section.Along).ToList();
+                report.AppendLine($"         widened along the beam from {along.Min().FeetToMm():0.#} " +
+                                  $"to {along.Max().FeetToMm():0.#}, between heights " +
+                                  $"{wide.Min(point => point.Z).FeetToMm():0.#} " +
+                                  $"and {wide.Max(point => point.Z).FeetToMm():0.#}");
+            }
+        }
+
+        /// <summary>
+        /// What the tool itself would make of every end, run against the model as it stands.
+        ///
+        /// Every limit is listed with the place it says the end may go, not only the one that wins.
+        /// Read against a model already built the right way, every end should come out at nought - so
+        /// any other number is a rule that is wrong, and the list says which limit produced it. Working
+        /// that out backwards from the one governing figure is what this section exists to stop.
+        /// </summary>
+        private static void Decide(StringBuilder report, Document document, IList<Part> beams)
+        {
+            var options = new AdjustBeamOptions();
+            var probe = new SupportProbe(document);
+
+            report.AppendLine($"Clearances: wall {options.WallClearanceMm:0.#}, " +
+                              $"pillar {options.PillarClearanceMm:0.#}, inline {options.InlineGapMm:0.#}, " +
+                              $"perpendicular {options.PerpendicularGapMm:0.#}");
+            report.AppendLine("A target of 0 means the end is already where that limit wants it.");
+
+            foreach (var part in beams)
+            {
+                var geometry = BeamGeometry.Create((FamilyInstance)part.Element);
+                if (geometry == null)
+                {
+                    continue;
+                }
+
+                foreach (var end in BeamGeometry.Ends)
+                {
+                    var supports = probe.Probe(geometry, end);
+                    var limits = BeamEndSolver.Weigh(supports, options, geometry.WidthMm);
+
+                    report.AppendLine();
+                    report.AppendLine($"BEAM {part.Element.Id.ToLong()} END {end}:");
+
+                    if (limits.Count == 0)
+                    {
+                        report.AppendLine("  nothing limits this end");
+                        continue;
+                    }
+
+                    foreach (var limit in limits)
+                    {
+                        var mark = limit.Governs ? " *** governs ***" : limit.Dropped ? "  (let go)" : string.Empty;
+                        var note = string.IsNullOrEmpty(limit.Note) ? string.Empty : "   " + limit.Note;
+
+                        report.AppendLine($"  {limit.Describe(),-34} -> {limit.TargetMm,9:+0.#;-0.#;0}{mark}{note}");
+                    }
+
+                    Verdict(report, supports, geometry, end, options);
+                }
+            }
+        }
+
+        /// <summary>How far the model and the tool disagree about this end, in one line.</summary>
+        private static void Verdict(
+            StringBuilder report,
+            IReadOnlyList<SupportCandidate> supports,
+            BeamGeometry geometry,
+            int end,
+            AdjustBeamOptions options)
+        {
+            var plan = BeamEndSolver.Solve(
+                geometry.Beam.Id.ToLong(),
+                end,
+                supports,
+                options,
+                geometry.LengthMm,
+                geometry.WidthMm,
+                geometry.AxisOffsetMm(end));
+
+            if (plan.IsSkipped)
+            {
+                report.AppendLine($"  decision: nothing done - {plan.SkipReason}");
+                return;
+            }
+
+            var cut = plan.NeedsCut
+                ? $", cut {plan.SkewDegrees:0.##} deg off square with the face at {plan.CutPlaneMm:+0.#;-0.#;0}"
+                : ", no cut";
+
+            report.AppendLine($"  decision: move the axis {plan.AxisTravelMm:+0.#;-0.#;0}{cut}");
+            report.AppendLine(Math.Abs(plan.AxisTravelMm) < BeamEndPlan.NegligibleMoveMm
+                ? "  ** agrees with the model **"
+                : $"  ** DISAGREES: the model has this end where it is, the tool would move it " +
+                  $"{plan.AxisTravelMm:0.#} mm **");
+        }
+
+        /// <summary>
+        /// Which column carries each beam end. With more than one column in the joint this is the
+        /// question everything else hangs on: the rule for two beams meeting head on parts them evenly
+        /// over the centre of the column they share, and a pair landing on different columns has no
+        /// shared centre to part over.
+        /// </summary>
+        private static void Bearing(StringBuilder report, IList<Part> beams, IList<Part> columns)
+        {
+            if (columns.Count == 0)
+            {
+                report.AppendLine("No column in the selection.");
+                return;
+            }
+
+            foreach (var column in columns)
+            {
+                report.AppendLine($"COLUMN {column.Element.Id.ToLong()}: centre {Mm(column.Centre)}   " +
+                                  $"top {column.TopZ.FeetToMm():0.#}");
+            }
+
+            for (var first = 0; first < columns.Count; first++)
+            {
+                for (var second = first + 1; second < columns.Count; second++)
+                {
+                    var apart = columns[first].Centre.ToXY().DistanceTo(columns[second].Centre.ToXY());
+                    report.AppendLine($"centres of {columns[first].Element.Id.ToLong()} and " +
+                                      $"{columns[second].Element.Id.ToLong()} are {apart.FeetToMm():0.#} apart");
+                }
+            }
+
+            foreach (var beam in beams.Where(beam => beam.Axis != null))
+            {
+                foreach (var end in new[] { 0, 1 })
+                {
+                    report.AppendLine();
+                    report.AppendLine($"BEAM {beam.Element.Id.ToLong()} END {end}:");
+
+                    var carried = false;
+                    foreach (var column in columns)
+                    {
+                        var line = BearsOn(beam, end, column);
+                        if (line == null)
+                        {
+                            continue;
+                        }
+
+                        carried = true;
+                        report.AppendLine("  " + line);
+                    }
+
+                    if (!carried)
+                    {
+                        report.AppendLine("  no column under this end");
+                    }
+                }
+            }
+        }
+
+        /// <summary>How one end sits over one column, or null when it does not sit over it at all.</summary>
+        private static string BearsOn(Part beam, int end, Part column)
+        {
+            var origin = beam.PointAt(end);
+            var outward = beam.OutwardAt(end);
+            var across = XYZ.BasisZ.CrossProduct(outward).Normalize();
+
+            var offsets = column.Vertices.Select(point => (point - origin).DotProduct(across)).ToList();
+            if (offsets.Count == 0 || offsets.Min() > 0 || offsets.Max() < 0)
+            {
+                // The axis of the beam runs beside the column rather than over it.
+                return null;
+            }
+
+            var along = column.Vertices.Select(point => (point - origin).DotProduct(outward)).ToList();
+            var centre = (column.Centre - origin).DotProduct(outward).FeetToMm();
+            var seat = (column.TopZ - beam.BottomZ).FeetToMm();
+
+            var note = Math.Abs(seat) <= BearingGapMm
+                ? "carries it"
+                : $"NOT carrying it, its top is {seat:+0.#;-0.#;0} from the underside";
+
+            return $"column {column.Element.Id.ToLong()}: near {along.Min().FeetToMm():+0.#;-0.#;0}   " +
+                   $"far {along.Max().FeetToMm():+0.#;-0.#;0}   centre {centre:+0.#;-0.#;0}   {note}";
+        }
+
+        /// <summary>
+        /// Every pair of beam ends in the joint, against what the tool asks before it treats them as
+        /// parting from a shared point. Printed for all pairs and not only the ones that pass, because
+        /// which pairs fail is the half of the answer that is easy to guess wrong.
+        /// </summary>
+        private static void EndPairs(StringBuilder report, IList<Part> beams, IList<Part> columns)
+        {
+            report.AppendLine($"Two ends are treated as meeting head on when their axes are within " +
+                              $"{FacingAxisDegrees:0} deg,");
+            report.AppendLine($"they run out at each other by at least {FacingApartDegrees:0} deg, and " +
+                              $"they are no more than {FacingReachMm:0} mm apart.");
+
+            var ends = beams
+                .Where(beam => beam.Axis != null)
+                .SelectMany(beam => new[] { 0, 1 }.Select(end => new { beam, end }))
+                .ToList();
+
+            for (var first = 0; first < ends.Count; first++)
+            {
+                for (var second = first + 1; second < ends.Count; second++)
+                {
+                    var a = ends[first];
+                    var b = ends[second];
+
+                    if (a.beam.Element.Id == b.beam.Element.Id)
+                    {
+                        continue;
+                    }
+
+                    var axes = Off90(a.beam.Direction, b.beam.Direction);
+                    var apart = a.beam.OutwardAt(a.end).AngleTo(b.beam.OutwardAt(b.end)).RadiansToDegrees();
+                    var gap = a.beam.PointAt(a.end).DistanceTo(b.beam.PointAt(b.end)).FeetToMm();
+
+                    var meets = axes <= FacingAxisDegrees
+                                && apart >= FacingApartDegrees
+                                && gap <= FacingReachMm;
+
+                    report.AppendLine();
+                    report.AppendLine($"{a.beam.Element.Id.ToLong()} END {a.end}  vs  " +
+                                      $"{b.beam.Element.Id.ToLong()} END {b.end}: " +
+                                      (meets ? "MEETING HEAD ON" : "crossing"));
+                    report.AppendLine($"  axes {axes:0.##} deg apart   running out {apart:0.##} deg apart   " +
+                                      $"ends {gap:0.#} apart");
+
+                    if (meets)
+                    {
+                        Shared(report, a.beam, a.end, b.beam, b.end, columns);
+                    }
+                }
+            }
+        }
+
+        /// <summary>Whether a pair meeting head on has a column in common to part over.</summary>
+        private static void Shared(
+            StringBuilder report,
+            Part first,
+            int firstEnd,
+            Part second,
+            int secondEnd,
+            IList<Part> columns)
+        {
+            var mine = columns.Where(column => BearsOn(first, firstEnd, column) != null).ToList();
+            var theirs = columns.Where(column => BearsOn(second, secondEnd, column) != null).ToList();
+            var both = mine.Where(column => theirs.Any(other => other.Element.Id == column.Element.Id)).ToList();
+
+            if (both.Count > 0)
+            {
+                foreach (var column in both)
+                {
+                    report.AppendLine($"  both sit over column {column.Element.Id.ToLong()}, centre " +
+                                      $"{(column.Centre - first.PointAt(firstEnd)).DotProduct(first.OutwardAt(firstEnd)).FeetToMm():+0.#;-0.#;0} " +
+                                      $"along the first and " +
+                                      $"{(column.Centre - second.PointAt(secondEnd)).DotProduct(second.OutwardAt(secondEnd)).FeetToMm():+0.#;-0.#;0} " +
+                                      "along the second");
+                }
+
+                return;
+            }
+
+            report.AppendLine("  ** no column in common **   " +
+                              $"first sits over [{Ids(mine)}], second over [{Ids(theirs)}]");
+            report.AppendLine("  There is no shared centre to part evenly over, so the rule as it stands");
+            report.AppendLine("  has no answer for this pair.");
+        }
+
+        /// <summary>
+        /// Where two beams actually share the same space. This is the reading the notcher works from -
+        /// comparing how far each beam reaches instead finds beams clashing that are a clean gap apart,
+        /// because a beam cut off at an angle reaches well past the corner it presents.
+        /// </summary>
+        private static void Clashes(StringBuilder report, IList<Part> beams)
+        {
+            var found = false;
+
+            for (var first = 0; first < beams.Count; first++)
+            {
+                for (var second = first + 1; second < beams.Count; second++)
+                {
+                    var a = beams[first];
+                    var b = beams[second];
+                    var shared = Shared(a, b);
+
+                    if (shared.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    found = true;
+                    var volume = shared.Sum(solid => solid.Volume);
+                    var points = shared.SelectMany(solid => solid.GetVertices()).ToList();
+
+                    report.AppendLine();
+                    report.AppendLine($"{a.Element.Id.ToLong()} and {b.Element.Id.ToLong()} overlap by " +
+                                      $"{volume * 304.8 * 304.8 * 304.8 / 1000:0} cm3");
+
+                    Overlap(report, a, points);
+                    Overlap(report, b, points);
+                }
+            }
+
+            if (!found)
+            {
+                report.AppendLine("No two of the selected beams share any space.");
+            }
+        }
+
+        /// <summary>Where an overlap falls in one beam's own terms, and whether it is in its block.</summary>
+        private static void Overlap(StringBuilder report, Part beam, IList<XYZ> points)
+        {
+            if (beam.Section == null)
+            {
+                return;
+            }
+
+            var along = points.Select(beam.Section.Along).ToList();
+            report.AppendLine($"  on {beam.Element.Id.ToLong()}: along the beam from " +
+                              $"{along.Min().FeetToMm():0.#} to {along.Max().FeetToMm():0.#}");
+
+            foreach (var side in new[] { 1, -1 })
+            {
+                var web = beam.Section.Web(side);
+                if (!web.HasValue || !beam.Section.HasBlock(side))
+                {
+                    continue;
+                }
+
+                var beyond = points
+                    .Where(point => beam.Section.Across(point, side) > web.Value + BeamSection.StepMm.MmToFeet())
+                    .Select(beam.Section.Along)
+                    .ToList();
+
+                if (beyond.Count > 0)
+                {
+                    report.AppendLine($"    in its {(side > 0 ? "left" : "right")} bearing block, from " +
+                                      $"{beyond.Min().FeetToMm():0.#} to {beyond.Max().FeetToMm():0.#}");
+                }
+            }
+        }
+
+        private static IList<Solid> Shared(Part first, Part second)
+        {
+            var result = new List<Solid>();
+
+            foreach (var mine in first.Solids)
+            {
+                foreach (var theirs in second.Solids)
+                {
+                    Solid shared;
+                    try
+                    {
+                        shared = BooleanOperationsUtils.ExecuteBooleanOperation(
+                            mine, theirs, BooleanOperationsType.Intersect);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    if (shared != null && shared.Volume >= NegligibleVolume)
+                    {
+                        result.Add(shared);
+                    }
+                }
+            }
+
+            return result;
+        }
+
+        private static string Ids(IEnumerable<Part> parts)
+        {
+            var list = parts.Select(part => part.Element.Id.ToLong().ToString()).ToList();
+            return list.Count == 0 ? "none" : string.Join(", ", list);
         }
 
         private static void DumpColumn(StringBuilder report, Document document, Part column)
@@ -301,6 +739,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                                  .Where(other => other.Element.Id != beam.Element.Id))
                     {
                         AgainstFaces(report, origin, outward, beam.Direction, other);
+                        Touches(report, beam, end, other);
                     }
                 }
             }
@@ -309,6 +748,96 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             {
                 CutPlanes(report, opening, beams, columns);
             }
+        }
+
+        /// <summary>
+        /// How far the end could still travel before it touched this part: the nearest its material
+        /// comes, counting only what stands inside the width and height the beam sweeps. Printed twice,
+        /// with and without the other beam's bearing block, because the block is cut back rather than
+        /// stood clear of - the difference between the two says whether it is really in the way.
+        /// </summary>
+        private static void Touches(StringBuilder report, Part beam, int end, Part other)
+        {
+            var origin = beam.ProbeOriginAt(end);
+            var outward = beam.OutwardAt(end);
+            var across = XYZ.BasisZ.CrossProduct(outward);
+
+            if (across.IsZeroLength() || other.Solids.Count == 0)
+            {
+                return;
+            }
+
+            var half = (beam.WidthMm / 2).MmToFeet();
+            var inside = other.Solids
+                .PointsInSlab(point => (point - origin).DotProduct(across.Normalize()), -half, half)
+                .Where(point => point.Z >= beam.BottomZ && point.Z <= beam.TopZ)
+                .ToList();
+
+            if (inside.Count == 0)
+            {
+                return;
+            }
+
+            var all = inside.Min(point => (point - origin).DotProduct(outward)).FeetToMm();
+
+            var web = other.Section == null
+                ? inside
+                : inside.Where(point => !other.Section.IsBeyondWeb(point)).ToList();
+
+            var withoutBlock = web.Count == 0
+                ? "(nothing but block)"
+                : $"{web.Min(point => (point - origin).DotProduct(outward)).FeetToMm():+0.#;-0.#;0}";
+
+            report.AppendLine($"    touches at {all:+0.#;-0.#;0} counting the bearing block, " +
+                              $"{withoutBlock} without it");
+
+            if (web.Count > 0)
+            {
+                Reach(report, beam, end, other, web.Min(point => (point - origin).DotProduct(outward)));
+            }
+        }
+
+        /// <summary>
+        /// Whether the support stands across the beam's whole width or only reaches in at a corner.
+        ///
+        /// This is what the solver goes by, so it is spelled out rather than left to be worked back
+        /// from the numbers. A face standing right across is met corner first, half a width of skew
+        /// ahead of where the axis crosses its plane; touching later than that means the face stops
+        /// somewhere inside the width, and only a tip is really in the way.
+        /// </summary>
+        private static void Reach(StringBuilder report, Part beam, int end, Part other, double touches)
+        {
+            var origin = beam.ProbeOriginAt(end);
+            var outward = beam.OutwardAt(end);
+
+            // Chosen the way the probe chooses, so the report and the tool never disagree about which
+            // face the end is arriving at.
+            var entry = other.Uprights
+                .Where(face => face.Normal.DotProduct(outward) < -0.05)
+                .Where(face => Math.Abs(outward.DotProduct(face.Normal)) > 1e-9)
+                .OrderBy(face => Math.Abs((face.Point - origin).DotProduct(face.Normal)
+                                          / outward.DotProduct(face.Normal)))
+                .FirstOrDefault();
+
+            if (entry == null)
+            {
+                return;
+            }
+
+            var skew = Off90(outward, entry.Normal);
+            var denominator = outward.DotProduct(entry.Normal);
+            if (Math.Abs(denominator) < 1e-9)
+            {
+                return;
+            }
+
+            var crossing = ((entry.Point - origin).DotProduct(entry.Normal) / denominator).FeetToMm();
+            var ifWhole = crossing - beam.WidthMm / 2 * Math.Tan(skew * Math.PI / 180);
+            var whole = touches.FeetToMm() <= ifWhole + 1;
+
+            report.AppendLine($"    {(whole ? "FACE" : "TIP ")}   {skew:0.##} deg off square   " +
+                              $"the axis crosses its plane at {crossing:+0.#;-0.#;0}, " +
+                              $"a whole face would be touched at {ifWhole:+0.#;-0.#;0}");
         }
 
         /// <summary>Where one end of a beam stands relative to the upright faces of another part.</summary>
@@ -621,6 +1150,13 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             public List<FacePlane> Uprights { get; private set; }
 
+            public IList<Solid> Solids { get; private set; }
+
+            public IList<XYZ> Vertices { get; private set; }
+
+            /// <summary>Read for beams only; null for anything else.</summary>
+            public BeamSection Section { get; private set; }
+
             public Line Axis { get; private set; }
 
             public XYZ AxisStart { get; private set; }
@@ -656,8 +1192,16 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 var solids = element.GetSolids().ToList();
 
                 part.Uprights = Planes(solids);
+                part.Solids = solids;
 
                 var vertices = solids.SelectMany(solid => solid.GetVertices()).ToList();
+                part.Vertices = vertices;
+
+                if (part.Role == Role.Beam)
+                {
+                    part.Section = BeamSection.Read(element);
+                }
+
                 if (vertices.Count > 0)
                 {
                     part.TopZ = vertices.Max(point => point.Z);
@@ -712,6 +1256,27 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             public int NearestEnd(XYZ point)
             {
                 return point.DistanceTo(PointAt(0)) <= point.DistanceTo(PointAt(1)) ? 0 : 1;
+            }
+
+            /// <summary>
+            /// The points where one flank really is wider than its web, so the caller can report how
+            /// far the widening runs and how tall it is.
+            ///
+            /// The span is reported end to end and not split into stretches. A straight edge tessellates
+            /// to its two endpoints and nothing in between, so a widening running the whole length comes
+            /// back as two lone points - and splitting on the gap between them reads that as two
+            /// separate widenings of no length at all, which is the opposite of the truth.
+            /// </summary>
+            public IEnumerable<XYZ> Widened(int side)
+            {
+                var web = Section?.Web(side);
+                if (Section == null || !web.HasValue || !Section.HasBlock(side))
+                {
+                    return Enumerable.Empty<XYZ>();
+                }
+
+                var step = BeamSection.StepMm.MmToFeet();
+                return Vertices.Where(point => Section.Across(point, side) > web.Value + step);
             }
 
             private static Role RoleOf(Element element)
