@@ -3,8 +3,9 @@ using System.Runtime.Serialization;
 namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
 {
     /// <summary>
-    /// What the user typed in the dialog. Every clearance is a gap in millimetres between the beam
-    /// end and the face of whatever supports it; the inline gap is the total gap between two beams
+    /// What the user typed in the dialog. Every clearance is a gap in millimetres between the beam end
+    /// and a face of whatever supports it - the near face for a wall or a beam the end runs into, the
+    /// far face for a pillar the beam runs over. The inline gap is the total gap between two beams
     /// meeting head on, so each of them stops half of it away from the shared centre.
     /// Serialised as-is by <see cref="Settings.SettingStore"/>.
     /// </summary>

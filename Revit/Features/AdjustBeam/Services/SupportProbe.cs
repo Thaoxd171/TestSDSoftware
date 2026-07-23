@@ -29,10 +29,36 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>Height searched above and below the beam, so columns on either side are found.</summary>
         private const double SearchHeightMm = 4000;
 
-        /// <summary>Two beams count as continuing each other below this angle and this offset.</summary>
+        /// <summary>Two beams on the same line count as continuing each other below this angle and offset.</summary>
         private const double InlineAngleDegrees = 5;
 
         private const double InlineOffsetMm = 50;
+
+        /// <summary>
+        /// Two beam ends count as meeting head on when their axes are no further apart than this and
+        /// they run out at each other. Precast beams landing on opposite sides of the same column are
+        /// rarely on one line - a third of a turn between them is normal - but they still share the
+        /// column and still have to part evenly over its centre, so the test is how squarely the two
+        /// ends face each other rather than how nearly parallel the beams are.
+        /// </summary>
+        private const double FacingAxisDegrees = 45;
+
+        private const double FacingApartDegrees = 135;
+
+        /// <summary>How near the other beam's end has to be before the two count as meeting at all.</summary>
+        private const double FacingReachMm = 1000;
+
+        /// <summary>A face counts as upright below this much tilt in its normal.</summary>
+        private const double UprightTolerance = 0.01;
+
+        /// <summary>Two normals count as the same axis this close to one.</summary>
+        private const double ParallelTolerance = 0.02;
+
+        /// <summary>How squarely a face has to look back at the beam to count as the one it meets.</summary>
+        private const double FacingTolerance = 0.05;
+
+        /// <summary>How much of the largest facing face a face must have before it counts as one.</summary>
+        private const double MinorFaceFraction = 0.2;
 
         private static readonly IList<BuiltInCategory> SupportCategories = new List<BuiltInCategory>
         {
@@ -68,7 +94,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 origin + outward * ForwardReachMm.MmToFeet());
 
             var candidates = FindNeighbours(beam.Beam, ray)
-                .Select(neighbour => Measure(beam, neighbour, origin, outward, ray))
+                .Select(neighbour => Measure(beam, neighbour, end, origin, outward, ray))
                 .Where(candidate => candidate != null)
                 .ToList();
 
@@ -142,9 +168,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 .Where(element => element.Id != beam.Id);
         }
 
-        private SupportCandidate Measure(BeamGeometry beam, Element neighbour, XYZ origin, XYZ outward, Line ray)
+        private SupportCandidate Measure(
+            BeamGeometry beam,
+            Element neighbour,
+            int end,
+            XYZ origin,
+            XYZ outward,
+            Line ray)
         {
-            var kind = Classify(beam, neighbour);
+            var kind = Classify(beam, neighbour, end);
             if (kind == SupportKind.None)
             {
                 return null;
@@ -159,10 +191,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var isColumn = kind == SupportKind.Pillar;
             var height = HeightAboveBeam(neighbour, beam);
 
-            var span = isColumn
-                ? SpanInPlan(solids, origin, outward)
-                : SpanAlongRay(solids, ray, origin, outward);
-
             var candidate = new SupportCandidate
             {
                 Id = neighbour.Id.ToLong(),
@@ -172,23 +200,70 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 BottomAboveBeamMm = height.Bottom,
             };
 
+            if (isColumn)
+            {
+                return MeasurePillar(candidate, neighbour, solids, origin, outward);
+            }
+
+            var span = SpanAlongRay(solids, ray, origin, outward);
             if (span == null)
             {
-                candidate.RejectionReason = isColumn
-                    ? "the beam axis passes beside it in plan"
-                    : "the beam axis does not run into it";
+                candidate.RejectionReason = "the beam axis does not run into it";
                 return candidate;
             }
 
             candidate.NearMm = span.Value.Near.FeetToMm();
             candidate.FarMm = span.Value.Far.FeetToMm();
-            candidate.CentreAlongMm = isColumn ? CentreAlong(neighbour, origin, outward, span.Value) : null;
+            candidate.ClearMm = Clearance(solids, beam, neighbour, kind, origin, outward)?.FeetToMm();
+
+            var entry = EntryNormal(neighbour, origin, outward);
+            candidate.SkewDegrees = entry == null ? 0 : AngleBetween(outward, entry);
 
             return candidate;
         }
 
+        /// <summary>
+        /// The closest the support's material comes to this end, measured along the beam axis and
+        /// counting only what stands inside the width and the height the beam sweeps. The face
+        /// crossing says where the plane of a face is; this says where the beam would actually touch.
+        /// </summary>
+        private static double? Clearance(
+            IList<Solid> solids,
+            BeamGeometry beam,
+            Element neighbour,
+            SupportKind kind,
+            XYZ origin,
+            XYZ outward)
+        {
+            var across = XYZ.BasisZ.CrossProduct(outward);
+            if (across.IsZeroLength())
+            {
+                return null;
+            }
+
+            across = across.Normalize();
+            var half = (beam.WidthMm / 2).MmToFeet();
+
+            // The bearing block on the end of another beam is not something to stand clear of - it is
+            // cut back to let this beam through - so the clearance is taken from the web behind it.
+            // Measure against the block instead and the two beams chase each other: back away from the
+            // block and the cut made for it shrinks, putting the block back in the way.
+            var section = kind == SupportKind.CrossingBeam || kind == SupportKind.InlineBeam
+                ? BeamSection.Read(neighbour)
+                : null;
+
+            var distances = solids
+                .PointsInSlab(point => (point - origin).DotProduct(across), -half, half)
+                .Where(point => point.Z >= beam.BottomZ && point.Z <= beam.TopZ)
+                .Where(point => section == null || !section.IsBeyondWeb(point))
+                .Select(point => (point - origin).DotProduct(outward))
+                .ToList();
+
+            return distances.Count == 0 ? (double?)null : distances.Min();
+        }
+
         /// <summary>What kind of support this element is for that beam, or None when it is not one.</summary>
-        private static SupportKind Classify(BeamGeometry beam, Element neighbour)
+        private static SupportKind Classify(BeamGeometry beam, Element neighbour, int end)
         {
             if (neighbour is Wall)
             {
@@ -214,11 +289,46 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             }
 
             var angle = AngleBetween(beam.Direction, otherAxis.Direction);
-            var offset = DistanceFromAxis(beam.Axis, otherAxis.GetEndPoint(0));
+            var offset = DistanceFromAxis(beam.AxisStart, beam.Direction, otherAxis.GetEndPoint(0));
 
-            return angle <= InlineAngleDegrees && offset.FeetToMm() <= InlineOffsetMm
-                ? SupportKind.InlineBeam
-                : SupportKind.CrossingBeam;
+            if (angle <= InlineAngleDegrees && offset.FeetToMm() <= InlineOffsetMm)
+            {
+                return SupportKind.InlineBeam;
+            }
+
+            return FaceToFace(beam, end, otherAxis) ? SupportKind.InlineBeam : SupportKind.CrossingBeam;
+        }
+
+        /// <summary>
+        /// Whether this end and the near end of the other beam are running out at each other. Two ends
+        /// that face each other are parting from a shared point, however far the beams are from being
+        /// on one line; an end that meets the flank of another beam is not, however nearly parallel
+        /// the two happen to run.
+        /// </summary>
+        private static bool FaceToFace(BeamGeometry beam, int end, Line otherAxis)
+        {
+            if (AngleBetween(beam.Direction, otherAxis.Direction) > FacingAxisDegrees)
+            {
+                return false;
+            }
+
+            var here = beam.PointAt(end);
+            var mine = beam.OutwardAt(end);
+
+            var nearest = Math.Min(
+                here.DistanceTo(otherAxis.GetEndPoint(0)),
+                here.DistanceTo(otherAxis.GetEndPoint(1)));
+
+            if (nearest.FeetToMm() > FacingReachMm)
+            {
+                return false;
+            }
+
+            var theirs = here.DistanceTo(otherAxis.GetEndPoint(0)) <= here.DistanceTo(otherAxis.GetEndPoint(1))
+                ? -otherAxis.Direction
+                : otherAxis.Direction;
+
+            return mine.AngleTo(theirs).RadiansToDegrees() >= FacingApartDegrees;
         }
 
         /// <summary>Where the ray enters and leaves the solids, relative to the beam end.</summary>
@@ -254,8 +364,125 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         }
 
         /// <summary>
-        /// Where the axis enters and leaves the solids seen from above, ignoring height. Used for
-        /// pillars, which sit above or below the beam rather than in its path.
+        /// Measures a pillar off its own faces rather than off the ray. Two reasons: the pillar stands
+        /// under the beam, so no ray along the axis would ever reach it; and when the beam arrives at
+        /// an angle, the outline of the pillar seen along the axis is wider than the pillar itself, so
+        /// the clearance has to be taken from the face plane the beam runs into, not from the outline.
+        /// Distances stay measured along the beam axis - they say where the axis crosses each plane.
+        /// </summary>
+        private static SupportCandidate MeasurePillar(
+            SupportCandidate candidate,
+            Element pillar,
+            IList<Solid> solids,
+            XYZ origin,
+            XYZ outward)
+        {
+            if (SpanInPlan(solids, origin, outward) == null)
+            {
+                candidate.RejectionReason = "the beam axis passes beside it in plan";
+                return candidate;
+            }
+
+            var faces = UprightFaces(solids);
+            if (faces.Count == 0)
+            {
+                candidate.RejectionReason = "the pillar has no upright faces to measure from";
+                return candidate;
+            }
+
+            // The face the beam runs into, already turned to point the way the beam is travelling.
+            var normal = EntryNormal(faces, outward);
+            if (normal == null)
+            {
+                candidate.RejectionReason = "no face of the pillar looks back at this end";
+                return candidate;
+            }
+
+            var crossings = faces
+                .Where(face => Math.Abs(Math.Abs(face.FaceNormal.DotProduct(normal)) - 1) < ParallelTolerance)
+                .Select(face => Crossing(face, origin, outward))
+                .Where(distance => distance.HasValue)
+                .Select(distance => distance.Value)
+                .ToList();
+
+            if (crossings.Count == 0)
+            {
+                candidate.RejectionReason = "the beam axis does not cross the pillar faces";
+                return candidate;
+            }
+
+            candidate.NearMm = crossings.Min().FeetToMm();
+            candidate.FarMm = crossings.Max().FeetToMm();
+            candidate.SkewDegrees = AngleBetween(outward, normal);
+
+            var centre = pillar.GetLocationPoint();
+            candidate.CentreAlongMm = centre == null
+                ? (candidate.NearMm + candidate.FarMm) / 2
+                : ((centre - origin).DotProduct(normal) / outward.DotProduct(normal)).FeetToMm();
+
+            return candidate;
+        }
+
+        /// <summary>
+        /// The upright face of a support that the beam runs into, returned as a normal pointing the
+        /// way the beam travels. This is the plane a skewed end has to be cut parallel to, so the
+        /// cutter asks for it again when it builds the opening.
+        /// Null when the support has no upright face facing the beam.
+        /// </summary>
+        public static XYZ EntryNormal(Element support, XYZ origin, XYZ outward)
+        {
+            return EntryNormal(UprightFaces(support.GetSolids()), outward);
+        }
+
+        /// <summary>
+        /// The face a beam running this way meets most squarely, as a normal pointing along the beam.
+        ///
+        /// Slivers are dropped before choosing. A precast column is chamfered at every corner, and a
+        /// 10 mm chamfer stands more squarely across a beam arriving at an angle than the face the beam
+        /// is really landing on - so going by squareness alone would line the end up with the corner.
+        /// </summary>
+        private static XYZ EntryNormal(IList<PlanarFace> faces, XYZ outward)
+        {
+            var facing = faces
+                .Where(face => face.FaceNormal.DotProduct(outward) < -FacingTolerance)
+                .ToList();
+
+            if (facing.Count == 0)
+            {
+                return null;
+            }
+
+            var biggest = facing.Max(face => face.Area);
+
+            var entry = facing
+                .Where(face => face.Area >= biggest * MinorFaceFraction)
+                .OrderBy(face => face.FaceNormal.DotProduct(outward))
+                .First();
+
+            return -entry.FaceNormal;
+        }
+
+        private static IList<PlanarFace> UprightFaces(IEnumerable<Solid> solids)
+        {
+            return solids
+                .SelectMany(solid => solid.Faces.Cast<Face>())
+                .OfType<PlanarFace>()
+                .Where(face => Math.Abs(face.FaceNormal.Z) < UprightTolerance)
+                .ToList();
+        }
+
+        /// <summary>How far along the axis, from the beam end, it crosses the plane of a face.</summary>
+        private static double? Crossing(PlanarFace face, XYZ origin, XYZ outward)
+        {
+            var denominator = outward.DotProduct(face.FaceNormal);
+            return Math.Abs(denominator) < GeometryExtensions.Tolerance
+                ? (double?)null
+                : (face.Origin - origin).DotProduct(face.FaceNormal) / denominator;
+        }
+
+        /// <summary>
+        /// Where the axis enters and leaves the solids seen from above, ignoring height. Used to tell
+        /// whether the beam passes over the pillar at all.
         /// </summary>
         private static (double Near, double Far)? SpanInPlan(IList<Solid> solids, XYZ origin, XYZ outward)
         {
@@ -288,15 +515,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return (along.Min(), along.Max());
         }
 
-        /// <summary>Distance from the beam end to the pillar centre, along the axis.</summary>
-        private static double CentreAlong(Element pillar, XYZ origin, XYZ outward, (double Near, double Far) span)
-        {
-            var centre = pillar.GetLocationPoint();
-            return centre != null
-                ? centre.Subtract(origin).DotProduct(outward).FeetToMm()
-                : ((span.Near + span.Far) / 2).FeetToMm();
-        }
-
         /// <summary>Angle between two directions, folded into 0-90 degrees.</summary>
         private static double AngleBetween(XYZ first, XYZ second)
         {
@@ -305,10 +523,10 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         }
 
         /// <summary>Distance from a point to a line, measured on the horizontal plane.</summary>
-        private static double DistanceFromAxis(Line axis, XYZ point)
+        private static double DistanceFromAxis(XYZ axisStart, XYZ axisDirection, XYZ point)
         {
-            var origin = axis.GetEndPoint(0).ToXY();
-            var direction = axis.Direction.ToXY();
+            var origin = axisStart.ToXY();
+            var direction = axisDirection.ToXY();
 
             if (direction.IsZeroLength())
             {

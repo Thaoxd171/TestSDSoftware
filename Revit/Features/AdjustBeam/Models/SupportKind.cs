@@ -10,9 +10,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
 
         /// <summary>
         /// A column, called a pillar in the brief. It sits under the beam rather than in its way, so
-        /// it plays three parts: its centre is the point two beams meeting head on share, its outer
-        /// face is as far as a beam may hang out over it, and it only decides an end outright when
-        /// there is nothing else in front.
+        /// it plays three parts: its centre is the point two beams meeting head on share, its far face
+        /// is as far as a beam may hang out over it, and when nothing else stands in front the beam
+        /// covers it and stops the pillar clearance short of that same far face.
         /// </summary>
         Pillar,
 

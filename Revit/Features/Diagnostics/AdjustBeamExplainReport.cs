@@ -71,8 +71,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 return;
             }
 
-            var axis = geometry.Axis;
-            report.AppendLine($"location  : {Mm(axis.GetEndPoint(0))} -> {Mm(axis.GetEndPoint(1))}");
+            report.AppendLine($"location  : {Mm(geometry.AxisStart)} -> {Mm(geometry.AxisFinish)}");
             report.AppendLine($"axis      : {Vec(geometry.Direction)}   solid length {geometry.LengthMm:0.#}");
             report.AppendLine($"extension : start {beam.GetLength(BuiltInParameter.START_EXTENSION).FeetToMm():0.#}" +
                               $"   end {beam.GetLength(BuiltInParameter.END_EXTENSION).FeetToMm():0.#}");
@@ -110,7 +109,8 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             }
 
             var plan = BeamEndSolver.Solve(
-                geometry.Beam.Id.ToLong(), end, accepted, options, geometry.LengthMm);
+                geometry.Beam.Id.ToLong(), end, accepted, options, geometry.LengthMm, geometry.WidthMm,
+                geometry.AxisOffsetMm(end));
 
             report.AppendLine();
             report.AppendLine($"    governing : {plan.Support}" +
@@ -128,6 +128,17 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             var verdict = plan.IsAlreadyCorrect ? "already correct, nothing done" : "the end would move";
             report.AppendLine($"    decision  : {plan.MoveMm:+0.##;-0.##;0} mm - {verdict}");
             report.AppendLine($"    target    : {Mm(target)}");
+
+            if (plan.NeedsCut)
+            {
+                report.AppendLine($"    cut       : {plan.SkewDegrees:0.##} deg off square to id {plan.CutAgainstId}, " +
+                                  $"so the axis runs out to cover the face and an opening trims back to " +
+                                  $"{plan.CutPlaneMm:+0.##;-0.##;0} mm");
+            }
+            else
+            {
+                report.AppendLine("    cut       : none, the end stays square");
+            }
         }
 
         private static void Print(StringBuilder report, SupportCandidate candidate)
@@ -136,9 +147,17 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 ? $"   centre {candidate.CentreAlongMm.Value:+0.#;-0.#;0}"
                 : string.Empty;
 
+            var skew = candidate.SkewDegrees > 0
+                ? $"   skew {candidate.SkewDegrees:0.##} deg"
+                : string.Empty;
+
+            var clear = candidate.ClearMm.HasValue
+                ? $"   touches at {candidate.ClearMm.Value:+0.#;-0.#;0}"
+                : string.Empty;
+
             report.AppendLine($"      [{(candidate.RejectionReason == null ? "kept    " : "rejected")}] " +
                               $"{candidate.Kind,-16} near {candidate.NearMm,8:+0.#;-0.#;0}  " +
-                              $"far {candidate.FarMm,8:+0.#;-0.#;0}{centre}   {candidate.Description}");
+                              $"far {candidate.FarMm,8:+0.#;-0.#;0}{centre}{skew}{clear}   {candidate.Description}");
             report.AppendLine($"                 height: {candidate.BottomAboveBeamMm:+0.#;-0.#;0} to " +
                               $"{candidate.TopAboveBeamMm:+0.#;-0.#;0} measured from the top of the beam");
 

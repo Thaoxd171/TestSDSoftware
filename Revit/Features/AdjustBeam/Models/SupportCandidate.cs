@@ -18,8 +18,27 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         /// <summary>Distance to the face on the far side.</summary>
         public double FarMm { get; set; }
 
+        /// <summary>
+        /// How far the end can still travel before it touches this support: the closest its material
+        /// comes, counting only what stands inside the width and height the beam sweeps.
+        ///
+        /// Where a support faces the beam squarely across its whole width this is simply the distance
+        /// to its face. It parts company when the face stops short - the cut end of another beam, say -
+        /// because then the beam meets a corner, and the corner is a good deal nearer than the point
+        /// where the axis would cross the face plane. Null when the support has no material in the way.
+        /// </summary>
+        public double? ClearMm { get; set; }
+
         /// <summary>Distance to the centre, along the axis. Only pillars carry one.</summary>
         public double? CentreAlongMm { get; set; }
+
+        /// <summary>
+        /// Angle between the beam axis and the face of the support it meets, where 0 means the beam
+        /// arrives square. Clearances are measured across that face, so a skewed beam has to travel a
+        /// little further along its own axis to keep the same gap - and its square-cut end no longer
+        /// lands parallel to the face, which is what the opening cut is for.
+        /// </summary>
+        public double SkewDegrees { get; set; }
 
         /// <summary>Top of the support, measured up from the top of the beam.</summary>
         public double TopAboveBeamMm { get; set; }

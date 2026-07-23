@@ -94,6 +94,63 @@ namespace SDSoftware.RevitTest.Extensions
             }
         }
 
+        /// <summary>
+        /// Points of the solids that lie inside a slab, where the slab is any measurement of a point
+        /// held between two values. Edges crossing a face of the slab contribute the crossing point.
+        ///
+        /// Corners alone are not enough: a face can pass right through the slab with both of its
+        /// corners outside, and the material nearest to whatever the slab represents would then be
+        /// missed altogether.
+        /// </summary>
+        public static IEnumerable<XYZ> PointsInSlab(
+            this IEnumerable<Solid> solids,
+            Func<XYZ, double> measure,
+            double low,
+            double high)
+        {
+            foreach (var solid in solids)
+            {
+                foreach (Edge edge in solid.Edges)
+                {
+                    IList<XYZ> points;
+                    try
+                    {
+                        points = edge.Tessellate();
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+
+                    var previous = 0d;
+
+                    for (var index = 0; index < points.Count; index++)
+                    {
+                        var value = measure(points[index]);
+
+                        if (value >= low && value <= high)
+                        {
+                            yield return points[index];
+                        }
+
+                        if (index > 0)
+                        {
+                            foreach (var bound in new[] { low, high })
+                            {
+                                if ((previous - bound) * (value - bound) < 0)
+                                {
+                                    var fraction = (bound - previous) / (value - previous);
+                                    yield return points[index - 1] + (points[index] - points[index - 1]) * fraction;
+                                }
+                            }
+                        }
+
+                        previous = value;
+                    }
+                }
+            }
+        }
+
         /// <summary>How far a set of solids reaches along a direction, relative to an origin.</summary>
         public static (double Min, double Max) ExtentAlong(this IEnumerable<Solid> solids, XYZ origin, XYZ direction)
         {
