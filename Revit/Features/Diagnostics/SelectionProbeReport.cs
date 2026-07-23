@@ -280,7 +280,13 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                         var mark = limit.Governs ? " *** governs ***" : limit.Dropped ? "  (let go)" : string.Empty;
                         var note = string.IsNullOrEmpty(limit.Note) ? string.Empty : "   " + limit.Note;
 
-                        report.AppendLine($"  {limit.Describe(),-34} -> {limit.TargetMm,9:+0.#;-0.#;0}{mark}{note}");
+                        var wedge = limit.WedgeMm < 0.05
+                            ? string.Empty
+                            : $"   wedge {limit.WedgeMm:0.#}" +
+                              (limit.CutsTheEnd ? string.Empty : ", too small to cut");
+
+                        report.AppendLine($"  {limit.Describe(),-34} -> {limit.TargetMm,9:+0.#;-0.#;0}" +
+                                          $"{mark}{wedge}{note}");
                     }
 
                     Verdict(report, supports, geometry, end, options);

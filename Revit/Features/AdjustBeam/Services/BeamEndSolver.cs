@@ -32,8 +32,16 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>A beam is never shortened below this length.</summary>
         public const double MinimumBeamLengthMm = 200;
 
-        /// <summary>Below this angle the end is treated as square and no opening is needed.</summary>
-        public const double SquareEnoughDegrees = 0.5;
+        /// <summary>
+        /// How thick the wedge left on a skewed end has to be before it is worth an opening.
+        ///
+        /// Measured along the beam, from the corner that reaches the face first to the one that
+        /// reaches it last, so it is the width of the beam times the tangent of the skew - a hundredth
+        /// of a turn across half a metre of beam is a couple of centimetres of wedge, and nobody cuts
+        /// that off. Reading it as a thickness rather than an angle is what makes it a judgement
+        /// anyone can make: an angle that matters on a wide beam does not on a narrow one.
+        /// </summary>
+        public const double NegligibleWedgeMm = 30;
 
         /// <summary>How far the corner of a face may miss the corner the beam reaches and still count.</summary>
         private const double ContactToleranceMm = 1;
@@ -73,7 +81,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
             var face = decision.TargetMm;
 
-            if (decision.SkewDegrees > SquareEnoughDegrees)
+            if (decision.CutsTheEnd)
             {
                 // A square cut through a skewed end reaches the face plane at one corner and falls
                 // short at the other, so the axis runs on until the near corner clears the plane too
@@ -159,7 +167,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
             return live
                 .Where(limit => limit.TargetMm <= nearest + TieToleranceMm)
-                .OrderBy(limit => limit.SkewDegrees > SquareEnoughDegrees ? 1 : 0)
+                .OrderBy(limit => limit.CutsTheEnd ? 1 : 0)
                 .ThenBy(limit => limit.TargetMm)
                 .First();
         }
@@ -226,6 +234,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 {
                     Support = pillar,
                     TargetMm = pillar.FarMm - AlongAxis(options.PillarClearanceMm, pillar),
+                    SkewDegrees = pillar.SkewDegrees,
                     CutAgainstId = pillar.Id,
                     Note = "clear of its far face",
                 });
@@ -241,6 +250,11 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                         Note = "stopping at its near face",
                     });
                 }
+            }
+
+            foreach (var limit in limits)
+            {
+                limit.WedgeMm = beamWidthMm * Math.Tan(Radians(limit.SkewDegrees));
             }
 
             return limits;
@@ -414,6 +428,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
             /// <summary>Set when the support stands across the beam's whole width, not on a tip.</summary>
             public bool MeetsAFace { get; set; }
+
+            /// <summary>
+            /// How much of the end a square cut would leave standing proud of the face, measured
+            /// along the beam from the first corner to reach it to the last.
+            /// </summary>
+            public double WedgeMm { get; set; }
+
+            /// <summary>Whether that wedge is worth taking off with an opening.</summary>
+            public bool CutsTheEnd => WedgeMm >= NegligibleWedgeMm;
 
             /// <summary>Set on a limit that answers the end on its own, without being weighed.</summary>
             public bool Settles { get; set; }
