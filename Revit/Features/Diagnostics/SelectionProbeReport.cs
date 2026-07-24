@@ -335,7 +335,9 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 options,
                 geometry.LengthMm,
                 geometry.WidthMm,
-                geometry.AxisOffsetMm(end));
+                geometry.AxisOffsetMm(end),
+                geometry.AcrossAt(end).Least,
+                geometry.AcrossAt(end).Most);
 
             if (plan.IsSkipped)
             {
@@ -344,7 +346,9 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
             }
 
             var cut = plan.NeedsCut
-                ? $", cut {plan.SkewDegrees:0.##} deg off square with the face at {plan.CutPlaneMm:+0.#;-0.#;0}"
+                ? ", cut " + string.Join(" and ", plan.Cuts.Select(one =>
+                    $"{one.SkewDegrees:0.##} deg off square with the face at {one.PlaneMm:+0.#;-0.#;0} " +
+                    $"(id {one.AgainstId}, taking off {one.DepthMm:0.#})"))
                 : ", no cut";
 
             var carried = geometry.AxisOffsetMm(end);
@@ -402,6 +406,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             var squaresOff = false;
             var faces = new List<double>();
+            var every = new List<double>();
 
             foreach (var item in found)
             {
@@ -425,6 +430,11 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                     faces.AddRange(planes);
                 }
 
+                // Every opening's planes count when the tool's cuts are checked, whole width or not.
+                // An end shaped by two planes is left partly by one and partly by the other, so neither
+                // opening spans the width on its own and both would otherwise go unchecked.
+                every.AddRange(planes);
+
                 report.AppendLine($"  model has opening {item.opening.Id.ToLong()}: " +
                                   $"{width:0.#} across the beam, " +
                                   (whole ? "squares the end off" : "a notch, not the width of the beam") +
@@ -440,20 +450,24 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 report.AppendLine("  model has no opening at this end");
             }
 
-            if (plan.NeedsCut && squaresOff)
+            if (plan.NeedsCut && squaresOff && every.Count > 0)
             {
                 // The face is what shows on a cut end, so it is the face that is compared. Which of
                 // the opening's two faces is the finished one is not worth working out - the other is
                 // a beam's width of skew away, far outside anything that would pass for agreement.
-                var nearest = faces.OrderBy(face => Math.Abs(face - plan.CutPlaneMm.Value)).First();
-                var apart = Math.Abs(nearest - plan.CutPlaneMm.Value);
+                foreach (var cut in plan.Cuts)
+                {
+                    var nearest = every.OrderBy(face => Math.Abs(face - cut.PlaneMm)).First();
+                    var apart = Math.Abs(nearest - cut.PlaneMm);
 
-                report.AppendLine(apart < BeamEndPlan.NegligibleMoveMm
-                    ? $"  ** agrees on the cut face: {plan.CutPlaneMm:+0.#;-0.#;0} against " +
-                      $"{nearest:+0.#;-0.#;0} **"
-                    : $"  ** DISAGREES on the cut face: the tool would cut at " +
-                      $"{plan.CutPlaneMm:+0.#;-0.#;0}, the model cuts at {nearest:+0.#;-0.#;0}, " +
-                      $"{apart:0.#} mm apart **");
+                    report.AppendLine(apart < BeamEndPlan.NegligibleMoveMm
+                        ? $"  ** agrees on the cut face: {cut.PlaneMm:+0.#;-0.#;0} against " +
+                          $"{nearest:+0.#;-0.#;0} **"
+                        : $"  ** DISAGREES on the cut face: the tool would cut at " +
+                          $"{cut.PlaneMm:+0.#;-0.#;0}, the model's nearest is {nearest:+0.#;-0.#;0}, " +
+                          $"{apart:0.#} mm apart **");
+                }
+
                 return;
             }
 

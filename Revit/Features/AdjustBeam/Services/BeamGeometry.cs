@@ -72,6 +72,19 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>Widest the beam gets across its axis, horizontally.</summary>
         public double WidthMm { get; private set; }
 
+        /// <summary>
+        /// How far the beam reaches either side of its own axis, signed, measured across the axis in
+        /// the direction the location line runs.
+        ///
+        /// Not half the width each way: a precast section need not be centred on its line. The KBBE at
+        /// 1855188 stands 170 mm to one side and 355 to the other, and an opening laid out symmetrically
+        /// about the axis misses the last 37 mm of the bearing block, leaving a fin of it standing where
+        /// the end was supposed to have been cut clean off.
+        /// </summary>
+        private double AcrossLeastMm { get; set; }
+
+        private double AcrossMostMm { get; set; }
+
         /// <summary>Height half way down the beam, where an opening profile is sketched.</summary>
         public double MiddleZ { get; private set; }
 
@@ -99,9 +112,13 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var inset = System.Math.Min(ProbeInsetMm.MmToFeet(), (top - bottom) / 2);
 
             var across = XYZ.BasisZ.CrossProduct(axis.Direction);
-            var width = across.IsZeroLength()
-                ? 0
-                : Spread(vertices.Select(point => point.DotProduct(across.Normalize())));
+            var offsets = across.IsZeroLength()
+                ? new List<double> { 0 }
+                : vertices
+                    .Select(point => (point - axis.GetEndPoint(0)).DotProduct(across.Normalize()))
+                    .ToList();
+
+            var width = offsets.Max() - offsets.Min();
 
             return new BeamGeometry(
                 beam,
@@ -113,9 +130,20 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 top - inset)
             {
                 WidthMm = width.FeetToMm(),
+                AcrossLeastMm = offsets.Min().FeetToMm(),
+                AcrossMostMm = offsets.Max().FeetToMm(),
                 MiddleZ = (top + bottom) / 2,
                 BottomZ = bottom,
             };
+        }
+
+        /// <summary>
+        /// How far the beam reaches either side of its axis, seen from one end. The sides swap over
+        /// between the two ends, because what is across the beam is taken from the way it runs out.
+        /// </summary>
+        public (double Least, double Most) AcrossAt(int end)
+        {
+            return end == 1 ? (AcrossLeastMm, AcrossMostMm) : (-AcrossMostMm, -AcrossLeastMm);
         }
 
         /// <summary>Where the solid stops, on the axis. End 0 is the start of the location line.</summary>
@@ -161,11 +189,5 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
         /// <summary>Both ends, so callers can loop without repeating the indices.</summary>
         public static IEnumerable<int> Ends => new[] { 0, 1 };
-
-        private static double Spread(IEnumerable<double> values)
-        {
-            var list = values.ToList();
-            return list.Count == 0 ? 0 : list.Max() - list.Min();
-        }
     }
 }

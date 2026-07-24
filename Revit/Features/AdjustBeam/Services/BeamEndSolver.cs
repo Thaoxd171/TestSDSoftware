@@ -43,8 +43,25 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// </summary>
         public const double NegligibleWedgeMm = 30;
 
+        /// <summary>
+        /// How much of its own thickness a wall has to be missing before it counts as opened up for
+        /// the beam. Seven tenths leaves room for the ray reading a millimetre or two short of a solid
+        /// wall without calling it a hole; the wall this was read off is missing well over half.
+        /// </summary>
+        private const double OpenedShare = 0.7;
+
         /// <summary>How far the corner of a face may miss the corner the beam reaches and still count.</summary>
         private const double ContactToleranceMm = 1;
+
+        /// <summary>
+        /// How much of the width a crossing beam has to stand across before this end is held clear of
+        /// it. Below that it is clipping a corner, not barring the way.
+        ///
+        /// The measured ends leave a wide gap to put this in: the one crossing beam the reference model
+        /// has an end resting against covers a sixteenth of the width, and the least any beam covers
+        /// that does place an end is a little under a quarter.
+        /// </summary>
+        private const double SliverShare = 0.15;
 
         /// <summary>How near two limits have to be before they count as putting the end in one place.</summary>
         private const double TieToleranceMm = 1;
@@ -54,6 +71,11 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// plain end; on one that has been cut it is what the axis has already travelled, and leaving
         /// it out would have the end asked to make the same journey over again.
         /// </param>
+        /// <param name="acrossLeastMm">
+        /// How far the beam reaches either side of its own axis, signed. Half the width each way when
+        /// left out, which is right for any section centred on its line and wrong for a precast one
+        /// that is not: the cut has to sweep past the material that is actually there.
+        /// </param>
         public static BeamEndPlan Solve(
             long beamId,
             int end,
@@ -61,11 +83,20 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             AdjustBeamOptions options,
             double beamLengthMm,
             double beamWidthMm,
-            double axisOffsetMm = 0)
+            double axisOffsetMm = 0,
+            double acrossLeastMm = 0,
+            double acrossMostMm = 0)
         {
+            if (acrossMostMm <= acrossLeastMm)
+            {
+                acrossLeastMm = -beamWidthMm / 2;
+                acrossMostMm = beamWidthMm / 2;
+            }
+
             var plan = new BeamEndPlan { BeamId = beamId, End = end };
 
-            var decision = Decide(supports, options, beamWidthMm);
+            var limits = Weigh(supports, options, beamWidthMm);
+            var decision = limits.FirstOrDefault(limit => limit.Governs);
             if (decision == null)
             {
                 plan.Support = SupportKind.None;
@@ -79,20 +110,10 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             plan.CutAgainstId = decision.CutAgainstId;
             plan.SkewDegrees = decision.SkewDegrees;
 
-            var face = decision.TargetMm;
-
-            if (decision.CutsTheEnd)
-            {
-                // A square cut through a skewed end reaches the face plane at one corner and falls
-                // short at the other, so the axis runs on until the near corner clears the plane too
-                // and an opening takes the wedge back off.
-                plan.CutPlaneMm = face;
-                plan.MoveMm = face + beamWidthMm / 2 * Math.Tan(Radians(decision.SkewDegrees));
-            }
-            else
-            {
-                plan.MoveMm = face;
-            }
+            var finish = Finish(limits, decision, acrossLeastMm, acrossMostMm);
+            plan.MoveMm = finish.ReachMm;
+            plan.Cuts = finish.Cuts;
+            plan.CutPlaneMm = finish.Cuts.Count == 0 ? (double?)null : finish.Cuts[0].PlaneMm;
 
             plan.AxisTravelMm = plan.MoveMm - axisOffsetMm;
 
@@ -106,20 +127,239 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
         private static double Radians(double degrees) => degrees * Math.PI / 180;
 
+        /// <summary>How near two planes have to be before cutting to both would be cutting twice.</summary>
+        private const double SamePlaneMm = 1;
+
         /// <summary>
-        /// What the end is being placed against, where that puts it, and how it is cut.
-        ///
-        /// Every support the end has to satisfy names a place it may go no further than, and the end
-        /// goes to the nearest of those. There is no order of precedence between the kinds: a beam
-        /// pushing into a joint goes in as deep as it can, and how deep that is depends on whichever
-        /// of the things around it runs out first.
+        /// The least a plane has to take off to be given an opening of its own, on an end that is being
+        /// shaped by more than one. Not the same judgement as <see cref="NegligibleWedgeMm"/>, which
+        /// asks whether an end is worth cutting at all: here it already is, and what is left is only to
+        /// keep a plane that grazes the corner by a hair from earning an opening.
         /// </summary>
-        private static BeamEndLimit Decide(
-            IReadOnlyList<SupportCandidate> supports,
-            AdjustBeamOptions options,
-            double beamWidthMm)
+        private const double SmallestBiteMm = 1;
+
+        /// <summary>Below this a normal counts as having no sideways lean at all.</summary>
+        private const double Flat = 1e-9;
+
+        /// <summary>
+        /// Where the end finishes up and which planes it is trimmed back to.
+        ///
+        /// A square cut through a skewed end reaches the face at one corner and falls short at the
+        /// other, so the axis runs on until the last corner has cleared the plane as well and an
+        /// opening takes the wedge back off. Run out that far and the finished end is the plane, whole.
+        ///
+        /// Where two planes share the end it need not run nearly so far, because between them they
+        /// take off the whole square end sooner - and it must not, because running on would drive it
+        /// through the second face. So the axis goes to the first place where nothing of the square
+        /// end survives, which comes to the same thing when there is only one plane.
+        /// </summary>
+        private static (double ReachMm, IList<BeamEndCut> Cuts) Finish(
+            IReadOnlyList<BeamEndLimit> limits,
+            BeamEndLimit decision,
+            double leastMm,
+            double mostMm)
         {
-            return Weigh(supports, options, beamWidthMm).FirstOrDefault(limit => limit.Governs);
+            var planes = Planes(limits, decision).ToList();
+            var reach = decision.TargetMm;
+
+            // A plane biting too little to be worth an opening is dropped, and the end then has to run
+            // further out to make up for what it is no longer taking off. Dropping one can only push
+            // the end out, which can only make the rest bite deeper, so this settles rather than cycles.
+            //
+            // Only an end with a single plane is judged that way, though. A nearly square face on its
+            // own means an end that should simply be moved rather than cut, and cutting it would be an
+            // opening to no purpose. Once a second plane is in play the end is a shape rather than a
+            // face, and the small plane is what finishes the corner the big one leaves: 1856700 END 1
+            // meets a wall 1.08 degrees off square, worth a wedge of ten millimetres, and the reference
+            // model cuts it - because without it the corner keeps that ten millimetres.
+            while (planes.Count > 0)
+            {
+                reach = Reach(planes, leastMm, mostMm);
+                var least = planes.Count > 1 ? SmallestBiteMm : NegligibleWedgeMm;
+
+                var biting = planes
+                    .Where(plane => Depth(plane, reach, leastMm, mostMm) >= least)
+                    .ToList();
+
+                if (biting.Count == planes.Count)
+                {
+                    break;
+                }
+
+                planes = biting;
+            }
+
+            if (planes.Count == 0)
+            {
+                return (decision.TargetMm, planes);
+            }
+
+            foreach (var plane in planes)
+            {
+                plane.DepthMm = Depth(plane, reach, leastMm, mostMm);
+            }
+
+            return (reach, planes);
+        }
+
+        /// <summary>
+        /// The planes the end has to be trimmed back to: the one it was placed against, and any wall
+        /// its corners still run past once it is there.
+        ///
+        /// Only a wall joins the governing plane. A wall stands the whole depth of the beam and more,
+        /// so every corner of the end has to clear it; a pillar is underneath, carrying the beam rather
+        /// than barring it, and a beam alongside has already been allowed for by whatever parted the
+        /// two. Nor a wall the beam passes through - one opened up to take the end is a bearing, and
+        /// its face is not there to be cut to. Nor one asking the end in nearer than it has been put:
+        /// that limit was overruled when the place was chosen, and cutting to it would take back what
+        /// the decision gave.
+        /// </summary>
+        private static IEnumerable<BeamEndCut> Planes(
+            IReadOnlyList<BeamEndLimit> limits,
+            BeamEndLimit decision)
+        {
+            var governing = Plane(decision);
+            yield return governing;
+
+            foreach (var limit in limits)
+            {
+                if (ReferenceEquals(limit, decision)
+                    || limit.Dropped
+                    || limit.Opened
+                    || limit.Support?.Kind != SupportKind.Wall
+                    || limit.TargetMm < decision.TargetMm - TieToleranceMm)
+                {
+                    continue;
+                }
+
+                var plane = Plane(limit);
+                if (Math.Abs(plane.AcrossNormal) > Flat && !SamePlane(plane, governing))
+                {
+                    yield return plane;
+                }
+            }
+        }
+
+        private static BeamEndCut Plane(BeamEndLimit limit)
+        {
+            return new BeamEndCut
+            {
+                PlaneMm = limit.TargetMm,
+                AlongNormal = Math.Cos(Radians(limit.SkewDegrees)),
+                AcrossNormal = limit.AcrossNormal,
+                SkewDegrees = limit.SkewDegrees,
+                AgainstId = limit.CutAgainstId,
+            };
+        }
+
+        private static bool SamePlane(BeamEndCut plane, BeamEndCut other)
+        {
+            return Math.Abs(plane.PlaneMm - other.PlaneMm) < SamePlaneMm
+                   && Math.Abs(plane.AlongNormal - other.AlongNormal) < 0.01
+                   && Math.Abs(plane.AcrossNormal - other.AcrossNormal) < 0.01;
+        }
+
+        /// <summary>
+        /// How deep a plane bites into the end, along the axis, measured at the corner it takes most
+        /// from. With a single plane this is the whole wedge.
+        /// </summary>
+        private static double Depth(BeamEndCut plane, double reachMm, double leastMm, double mostMm)
+        {
+            return reachMm - plane.PlaneMm + Lean(plane, leastMm, mostMm);
+        }
+
+        /// <summary>
+        /// How far past the axis the corner of the end that meets this plane first sticks out, measured
+        /// along the beam. Zero on a face met square; on a skewed one it is the side the face leans
+        /// away from, so an end reaching further one side of its axis than the other gets the right
+        /// answer rather than an average of the two.
+        /// </summary>
+        private static double Lean(BeamEndCut plane, double leastMm, double mostMm)
+        {
+            var far = plane.AcrossNormal > 0 ? mostMm : leastMm;
+            return plane.AcrossNormal / plane.AlongNormal * far;
+        }
+
+        /// <summary>The same for the corner that meets it last. The two together are the whole wedge.</summary>
+        private static double NearLean(BeamEndCut plane, double leastMm, double mostMm)
+        {
+            var near = plane.AcrossNormal > 0 ? leastMm : mostMm;
+            return -plane.AcrossNormal / plane.AlongNormal * near;
+        }
+
+        /// <summary>
+        /// How far out the axis has to go before no part of the square end survives the planes.
+        ///
+        /// Coverage only ever improves as the end runs out - every plane sweeps one way across the
+        /// width - so the answer is found by halving the interval between a reach that clearly leaves
+        /// something standing and one that clearly does not.
+        /// </summary>
+        private static double Reach(IList<BeamEndCut> planes, double leastMm, double mostMm)
+        {
+            // Short of every plane's first corner nothing is touched; each plane on its own has the
+            // whole end clear by the time its last corner is past, so the nearest of those covers it.
+            var low = planes.Select(plane => plane.PlaneMm - Lean(plane, leastMm, mostMm)).Min() - 1;
+            var high = planes.Select(plane => plane.PlaneMm + NearLean(plane, leastMm, mostMm)).Min();
+
+            for (var step = 0; step < 60 && high - low > 1e-9; step++)
+            {
+                var middle = (low + high) / 2;
+                if (Covered(planes, middle, leastMm, mostMm))
+                {
+                    high = middle;
+                }
+                else
+                {
+                    low = middle;
+                }
+            }
+
+            return high;
+        }
+
+        /// <summary>
+        /// Whether the planes between them take off the whole of the square end sitting at that reach.
+        ///
+        /// Each plane cuts everything to one side of a line across the end, so what it removes is a
+        /// half of the width. The end is gone when the halves overlap, or when one of them covers the
+        /// width on its own.
+        /// </summary>
+        private static bool Covered(
+            IEnumerable<BeamEndCut> planes,
+            double reachMm,
+            double leastMm,
+            double mostMm)
+        {
+            var below = double.NegativeInfinity;
+            var above = double.PositiveInfinity;
+
+            foreach (var plane in planes)
+            {
+                var slack = plane.AlongNormal * (plane.PlaneMm - reachMm);
+
+                if (Math.Abs(plane.AcrossNormal) < Flat)
+                {
+                    // Met square: nothing survives the moment the end is past it.
+                    if (slack < 0)
+                    {
+                        return true;
+                    }
+
+                    continue;
+                }
+
+                var edge = slack / plane.AcrossNormal;
+                if (plane.AcrossNormal > 0)
+                {
+                    above = Math.Min(above, edge);
+                }
+                else
+                {
+                    below = Math.Max(below, edge);
+                }
+            }
+
+            return above < below || below > mostMm || above < leastMm;
         }
 
         /// <summary>
@@ -155,6 +395,32 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// where the wall behind is a few degrees off; letting the wall win by a tenth of a millimetre
         /// puts an angled cut on an end that wants none.
         /// </summary>
+        /// <summary>
+        /// Whether the wall has been cut away where this beam meets it.
+        ///
+        /// A beam running into a solid wall meets its whole thickness - 1751117 is 180 thick and met at
+        /// 27 degrees, and the beam passes through 202 mm of it, which is 180 over the cosine to the
+        /// millimetre. Meeting markedly less than that means the material is not all there: 1662890 is
+        /// 220 thick and the beam passes through 93 mm of it, because its profile has been edited to
+        /// let the beam in. Such a wall is a bearing rather than an obstruction, and the end stops
+        /// short of its far side.
+        ///
+        /// Read off three walls. It holds for all three and rests on a measurement rather than a
+        /// threshold picked to fit, but three is three.
+        /// </summary>
+        private static bool OpenedForTheBeam(SupportCandidate wall)
+        {
+            if (wall.ThicknessMm <= 0 || wall.SpanMm <= 0)
+            {
+                return false;
+            }
+
+            // Along the beam, not across it: a wall met at an angle is longer to pass through than it
+            // is thick, and comparing the two without allowing for that calls every skewed wall solid.
+            var expected = wall.ThicknessMm / Math.Cos(Radians(wall.SkewDegrees));
+            return wall.SpanMm < expected * OpenedShare;
+        }
+
         private static BeamEndLimit Nearest(IEnumerable<BeamEndLimit> found)
         {
             var live = found.Where(limit => !limit.Dropped).ToList();
@@ -199,6 +465,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                     Support = inline,
                     TargetMm = shared - AlongAxis(options.InlineGapMm / 2, against),
                     SkewDegrees = against.SkewDegrees,
+                    AcrossNormal = against.EntryAcross,
                     CutAgainstId = against.Id,
                     Settles = true,
                     Note = "parting over " + (pillar == null ? "the midpoint" : "pillar " + pillar.Id),
@@ -218,16 +485,28 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 // wall's body is still ahead, and it is the face it has to clear: the end is set
                 // parallel to it and stood off it, exactly as it is at any other wall. The two readings
                 // agree wherever a beam runs squarely into a wall, which is most of them.
+                //
+                // Unless the wall has been opened up to take the beam, in which case it is a bearing
+                // and the end stops short of the far side, the way it does on a pillar. The entry face
+                // is no use there: its plane still runs the whole length of the wall, unbroken, while
+                // the material at that one spot has been cut away.
+                var opened = OpenedForTheBeam(wall);
+
                 limits.Add(new BeamEndLimit
                 {
                     Support = wall,
-                    TargetMm = (wall.EntryFaceMm ?? wall.NearMm) - AlongAxis(options.WallClearanceMm, wall),
+                    TargetMm = (opened ? wall.FarMm : wall.EntryFaceMm ?? wall.NearMm)
+                               - AlongAxis(options.WallClearanceMm, wall),
                     SkewDegrees = wall.SkewDegrees,
+                    AcrossNormal = wall.EntryAcross,
                     CutAgainstId = wall.Id,
+                    Opened = opened,
                     Dropped = options.ExtendToBeamBodyAtWall && crossings > 0,
                     Note = options.ExtendToBeamBodyAtWall && crossings > 0
                         ? "let go: the end may run over the wall to reach a beam"
-                        : null,
+                        : opened
+                            ? "opened up for the beam, so measured off its far side"
+                            : null,
                 });
             }
 
@@ -241,6 +520,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                     Support = pillar,
                     TargetMm = pillar.FarMm - AlongAxis(options.PillarClearanceMm, pillar),
                     SkewDegrees = pillar.SkewDegrees,
+                    AcrossNormal = pillar.EntryAcross,
                     CutAgainstId = pillar.Id,
                     Note = "clear of its far face",
                 });
@@ -252,6 +532,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                         Support = pillar,
                         TargetMm = pillar.NearMm - AlongAxis(options.PillarClearanceMm, pillar),
                         SkewDegrees = pillar.SkewDegrees,
+                        AcrossNormal = pillar.EntryAcross,
                         CutAgainstId = pillar.Id,
                         Note = "stopping at its near face",
                     });
@@ -301,6 +582,12 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// tips are let go: holding a full clearance off every tip in a crowded joint would push the
         /// beams apart for the sake of slivers, and the tips are there because two other beams have
         /// already been parted. Where there is no face, the tip is all there is, and it is cleared.
+        ///
+        /// A beam barely reaching into the width is let go before any of that. It is the same thought -
+        /// a sliver is not worth pushing a beam off - said by measuring the sliver rather than by
+        /// waiting for some other beam to present a face. 2975257 stands across a sixteenth of 1856700
+        /// and the reference model has the two resting against each other; every crossing beam that
+        /// really places an end covers between a fifth and two thirds of it.
         /// </summary>
         private static IList<BeamEndLimit> Crossings(
             IReadOnlyList<SupportCandidate> supports,
@@ -312,9 +599,17 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 .Select(support => CrossingAgainst(support, options, beamWidthMm))
                 .ToList();
 
-            if (all.Any(limit => limit.MeetsAFace))
+            foreach (var sliver in all.Where(limit => limit.Support.InsideMm < beamWidthMm * SliverShare))
             {
-                foreach (var tip in all.Where(limit => !limit.MeetsAFace))
+                sliver.Dropped = true;
+                sliver.Note = $"let go: it stands across only {sliver.Support.InsideMm:0.#} of the " +
+                              $"{beamWidthMm:0.#} this end sweeps";
+            }
+
+            var live = all.Where(limit => !limit.Dropped).ToList();
+            if (live.Any(limit => limit.MeetsAFace))
+            {
+                foreach (var tip in live.Where(limit => !limit.MeetsAFace))
                 {
                     tip.Dropped = true;
                     tip.Note = "let go: only a tip reaches in, and a whole face was found";
@@ -359,6 +654,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                     Support = support,
                     TargetMm = support.NearMm - AlongAxis(gap, support),
                     SkewDegrees = support.SkewDegrees,
+                    AcrossNormal = support.EntryAcross,
                     CutAgainstId = support.Id,
                     MeetsAFace = true,
                 }
@@ -429,6 +725,17 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             public double TargetMm { get; set; }
 
             public double SkewDegrees { get; set; }
+
+            /// <summary>
+            /// Which way the face leans across the beam, signed, taken from the support the end is
+            /// squared up to. The skew says how far off square the face is; this says which corner of
+            /// the end meets it first, which is what decides whether two planes take opposite halves
+            /// of the end or the same one.
+            /// </summary>
+            public double AcrossNormal { get; set; }
+
+            /// <summary>Set on a wall the beam passes through rather than stops against.</summary>
+            public bool Opened { get; set; }
 
             public long CutAgainstId { get; set; }
 

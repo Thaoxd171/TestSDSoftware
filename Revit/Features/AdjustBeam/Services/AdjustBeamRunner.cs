@@ -9,20 +9,26 @@ using SDSoftware.RevitTest.Features.AdjustBeam.Models;
 namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 {
     /// <summary>
-    /// Runs the tool in four passes: measure everything, decide everything, write everything, then read
-    /// the model back and check the beams really ended up where they were sent.
+    /// Places every picked beam, one at a time, sweeping over them again and again until a whole sweep
+    /// changes nothing.
     ///
-    /// Measuring and deciding are kept apart from writing on purpose. Two beams meeting head on are
-    /// each measured against the other, so if the first one moved before the second was measured, the
-    /// second would chase it and the gap would come out wrong.
+    /// Each beam is put back to where the run found it before it is measured. That is the heart of it.
+    /// A beam is placed by measuring what stands in front of its ends, so where two beams meet, the
+    /// first to be dealt with is measured against a neighbour still standing where it does not belong.
+    /// Measured again later, from the place that first reading sent it to, it reports itself correct -
+    /// it is now resting against the neighbour, and nothing in the rules can tell that it should never
+    /// have gone there. 2495769 was driven 155 mm out to reach a beam that was itself about to be cut
+    /// back, and no number of further sweeps brought it home. Restoring it first is what lets a later
+    /// sweep overrule an earlier one.
     ///
-    /// The whole thing is then repeated until a round changes nothing. One round cannot always finish
-    /// the job: a beam stopping short of its neighbour is measured against the neighbour as it stands,
-    /// and if that neighbour is itself about to be cut back, the answer was taken from a shape that no
-    /// longer exists. Each round measures everything afresh, so the ends settle where they belong
-    /// within two or three of them. Rounds converge rather than oscillate because no rule places an
-    /// end relative to something that is chasing it: beams parting over a column both go to the centre
-    /// of that column, which does not move.
+    /// Because each beam sees the ones before it as they now stand, the answer depends on the order the
+    /// beams are picked in. That is the price of the thing working at all: an end has to be measured
+    /// against something, and a neighbour where it belongs is a better something than a neighbour where
+    /// it started. Beams whose ends are settled by a parting - which needs nothing but the column the
+    /// two share - come out the same whenever they are reached, and they are what the rest hang off.
+    ///
+    /// The bearing blocks are cut last of all, once every end has stopped moving: what is in the way of
+    /// what cannot be known until then.
     ///
     /// The check at the end exists because an assignment that raises no exception is not proof that
     /// anything moved - Revit can put an end straight back - and a tool reporting work it did not do
@@ -30,18 +36,22 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
     /// </summary>
     public class AdjustBeamRunner
     {
-        private const string ReadStep = "Read beam geometry";
-        private const string SolveStep = "Find connection info";
-        private const string AdjustStep = "Adjust structural beam";
+        private const string SweepStep = "Adjust structural beam";
         private const string CheckStep = "Check the result";
 
         /// <summary>How far off target an end may land before it is called a failure.</summary>
         private const double ToleranceMm = 0.5;
 
-        /// <summary>How many times the whole job is redone before it is called settled anyway.</summary>
-        private const int MaximumRounds = 4;
+        /// <summary>How many times the whole job is swept before it is called settled anyway.</summary>
+        private const int MaximumSweeps = 5;
 
         private readonly Document _document;
+
+        /// <summary>The openings this run has cut, per beam, so that they can be taken back off.</summary>
+        private readonly Dictionary<long, List<ElementId>> _made = new Dictionary<long, List<ElementId>>();
+
+        /// <summary>Where each beam's axis was left by the sweep before, to tell a sweep that changed nothing.</summary>
+        private readonly Dictionary<long, XYZ[]> _where = new Dictionary<long, XYZ[]>();
 
         public AdjustBeamRunner(Document document)
         {
@@ -53,56 +63,50 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var result = new AdjustResult { BeamsExamined = beams.Count };
             progress.Log($"{beams.Count} beam(s) picked.");
 
-            IList<BeamPlan> plans = null;
-
             // The openings this tool cuts reach past the beams they cut, so that the corners come out
             // clean; Revit says so every time, and it is not worth asking about.
             var expected = ExpectedWarnings.FromOpeningsThatOverreach();
+            IList<BeamPlan> plans = null;
 
             using (var transaction = new Transaction(_document, "Adjust Beams"))
             {
                 expected.TakeChargeOf(transaction);
                 transaction.Start();
 
-                for (var round = 1; round <= MaximumRounds && !progress.IsCancelled; round++)
+                var starts = Capture(beams, result, progress);
+
+                for (var sweep = 1; sweep <= MaximumSweeps && !progress.IsCancelled; sweep++)
                 {
-                    if (round > 1)
+                    if (sweep > 1)
                     {
-                        progress.Log($"Round {round}: measuring again now that the beams have moved.");
+                        progress.Log($"Sweep {sweep}: measuring again now that the beams have moved.");
                     }
 
-                    var geometries = Read(beams, result, progress);
-                    if (progress.IsCancelled)
-                    {
-                        break;
-                    }
-
-                    plans = Solve(geometries, options, progress);
-                    if (progress.IsCancelled)
-                    {
-                        break;
-                    }
-
-                    // Every round rebuilds the openings from scratch, so the last one to run leaves the
+                    // Every sweep rebuilds the openings from scratch, so the last one to run leaves the
                     // model complete however many came before it.
                     result.Reset();
-                    Apply(plans, result, progress);
 
-                    if (!plans.Any(plan => plan.HasMove))
+                    bool changed;
+                    plans = Sweep(starts, options, result, progress, out changed);
+
+                    if (progress.IsCancelled || !changed)
                     {
                         break;
                     }
 
-                    if (round == MaximumRounds)
+                    if (sweep == MaximumSweeps)
                     {
-                        // Every case met so far settles in three. Running out of rounds means two ends
-                        // are still moving each other, and saying so beats leaving it to be noticed.
+                        // Every case met so far settles in three. Running out means two ends are still
+                        // moving each other, and saying so beats leaving it to be noticed.
                         result.DidNotSettle = true;
-                        progress.Log($"Still moving after {MaximumRounds} rounds. The ends listed above " +
-                                     "are where this round left them, not where the rules want them.");
+                        progress.Log($"Still moving after {MaximumSweeps} sweeps. The ends listed above " +
+                                     "are where this sweep left them, not where the rules want them.");
                     }
+                }
 
-                    _document.Regenerate();
+                if (!progress.IsCancelled)
+                {
+                    Notch(plans, result, progress);
                 }
 
                 transaction.Commit();
@@ -123,79 +127,46 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return result;
         }
 
-        /// <summary>Pass 1: capture every beam as it stands now.</summary>
-        private static List<BeamGeometry> Read(
+        /// <summary>Remembers every beam as it stands before anything is written.</summary>
+        private static List<BeamStart> Capture(
             IList<FamilyInstance> beams,
             AdjustResult result,
             IProgressSink progress)
         {
-            var geometries = new List<BeamGeometry>();
-            progress.Report(ReadStep, 0);
+            var starts = new List<BeamStart>();
 
-            for (var index = 0; index < beams.Count && !progress.IsCancelled; index++)
+            foreach (var beam in beams)
             {
-                var beam = beams[index];
-                var geometry = BeamGeometry.Create(beam);
-
-                if (geometry == null)
+                var start = BeamStart.Capture(beam);
+                if (start == null)
                 {
                     result.EndsSkipped += 2;
-                    progress.Log($"id {beam.Id.ToLong()}: skipped, no straight axis or no geometry.");
+                    progress.Log($"id {beam.Id.ToLong()}: skipped, no straight axis.");
                 }
                 else
                 {
-                    geometries.Add(geometry);
+                    starts.Add(start);
                 }
-
-                progress.Report(ReadStep, (index + 1) / (double)beams.Count);
             }
 
-            return geometries;
+            return starts;
         }
 
-        /// <summary>Pass 2: work out where every end belongs. Still nothing is written.</summary>
-        private List<BeamPlan> Solve(
-            IList<BeamGeometry> geometries,
+        /// <summary>One pass over every beam. Reports whether any of them ended up somewhere new.</summary>
+        private IList<BeamPlan> Sweep(
+            IList<BeamStart> starts,
             AdjustBeamOptions options,
-            IProgressSink progress)
+            AdjustResult result,
+            IProgressSink progress,
+            out bool changed)
         {
             var probe = new SupportProbe(_document);
             var plans = new List<BeamPlan>();
-            progress.Report(SolveStep, 0);
+            changed = false;
 
-            for (var index = 0; index < geometries.Count && !progress.IsCancelled; index++)
-            {
-                var geometry = geometries[index];
+            progress.Report(SweepStep, 0);
 
-                var ends = BeamGeometry.Ends
-                    .Select(end => BeamEndSolver.Solve(
-                        geometry.Beam.Id.ToLong(),
-                        end,
-                        probe.Probe(geometry, end),
-                        options,
-                        geometry.LengthMm,
-                        geometry.WidthMm,
-                        geometry.AxisOffsetMm(end)))
-                    .ToList();
-
-                plans.Add(new BeamPlan(geometry, ends));
-                progress.Report(SolveStep, (index + 1) / (double)geometries.Count);
-            }
-
-            return plans;
-        }
-
-        /// <summary>Pass 3: the only pass that touches the model. One write per beam.</summary>
-        private void Apply(IList<BeamPlan> plans, AdjustResult result, IProgressSink progress)
-        {
-            progress.Report(AdjustStep, 0);
-
-            // An opening pins the beam it is cut from, so anything already at an end this run is going
-            // to touch comes off first, before the axis moves.
-            Clear(plans, progress);
-            _document.Regenerate();
-
-            for (var index = 0; index < plans.Count; index++)
+            for (var index = 0; index < starts.Count; index++)
             {
                 if (progress.IsCancelled)
                 {
@@ -204,68 +175,182 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                     break;
                 }
 
-                var plan = plans[index];
-                result.EndsSkipped += plan.Ends.Count(end => end.IsSkipped);
-                result.EndsAlreadyCorrect += plan.Ends.Count(end => end.IsAlreadyCorrect);
+                var start = starts[index];
 
-                if (plan.NeedsWork)
+                Undo(start, progress);
+                _document.Regenerate();
+
+                var plan = Settle(start, probe, options, result, progress);
+                if (plan != null)
                 {
-                    Move(plan, result, progress);
+                    plans.Add(plan);
                 }
 
-                progress.Report(AdjustStep, (index + 1) / (double)plans.Count);
+                if (Moved(start.Beam))
+                {
+                    changed = true;
+                }
+
+                progress.Report(SweepStep, (index + 1) / (double)starts.Count);
             }
 
-            // Revit has to catch up with the new axes before anything is sketched against them.
-            _document.Regenerate();
-            Confirm(plans, progress);
+            return plans;
+        }
 
-            foreach (var plan in plans)
+        /// <summary>
+        /// Puts one beam back the way the run found it. The openings come off first: an opening is
+        /// sketched against its host, and while one is there Revit quietly refuses to move the beam
+        /// under it.
+        /// </summary>
+        private void Undo(BeamStart start, IProgressSink progress)
+        {
+            var id = start.Beam.Id.ToLong();
+
+            if (_made.TryGetValue(id, out var openings))
             {
+                foreach (var opening in openings)
+                {
+                    try
+                    {
+                        _document.Delete(opening);
+                    }
+                    catch (Exception ex)
+                    {
+                        progress.Log($"id {id}: could not take back an opening - {ex.Message}");
+                    }
+                }
+
+                openings.Clear();
+            }
+
+            start.Restore();
+        }
+
+        /// <summary>Measures one beam where it started, decides both ends, and writes them.</summary>
+        private BeamPlan Settle(
+            BeamStart start,
+            SupportProbe probe,
+            AdjustBeamOptions options,
+            AdjustResult result,
+            IProgressSink progress)
+        {
+            var geometry = BeamGeometry.Create(start.Beam);
+            if (geometry == null)
+            {
+                result.EndsSkipped += 2;
+                progress.Log($"id {start.Beam.Id.ToLong()}: skipped, no geometry to read.");
+                return null;
+            }
+
+            var ends = Decide(geometry, probe, options);
+
+            // Whatever the model already carried at the ends this run is about to work on comes off
+            // now. Only those ends: an end the run leaves exactly as it is keeps its cut, because it
+            // is not this tool's place to take one out of a model and put nothing back, and because
+            // the end was measured with that cut in place and found right because of it.
+            if (ClearOld(geometry, ends, progress) > 0)
+            {
+                _document.Regenerate();
+                geometry = BeamGeometry.Create(start.Beam);
+                if (geometry == null)
+                {
+                    result.EndsSkipped += 2;
+                    return null;
+                }
+
+                ends = Decide(geometry, probe, options);
+            }
+
+            result.EndsSkipped += ends.Count(end => end.IsSkipped);
+            result.EndsAlreadyCorrect += ends.Count(end => end.IsAlreadyCorrect);
+
+            var plan = new BeamPlan(geometry, ends);
+
+            if (plan.NeedsWork)
+            {
+                Move(plan, result, progress);
+                _document.Regenerate();
+                Confirm(plan, progress);
+
                 foreach (var end in plan.Ends.Where(end => end.NeedsCut))
                 {
                     Trim(plan, end, result, progress);
                 }
+
+                _document.Regenerate();
             }
 
-            // The blocks are cut last: what stands in the way of what is only settled once every end
-            // has been placed and every skewed one squared off.
-            _document.Regenerate();
-            Notch(plans, result, progress);
+            return plan;
         }
 
-        /// <summary>
-        /// Removes the openings this tool owns from both ends of every beam in the run, whether that
-        /// end is going to move or not: a block cut for a neighbour that has since moved has to go
-        /// even when this beam itself stays put. Only the ends are swept, so a service hole in the
-        /// middle of a span is left alone.
-        /// </summary>
-        private void Clear(IEnumerable<BeamPlan> plans, IProgressSink progress)
+        private static IList<BeamEndPlan> Decide(
+            BeamGeometry geometry,
+            SupportProbe probe,
+            AdjustBeamOptions options)
         {
-            foreach (var plan in plans)
+            return BeamGeometry.Ends
+                .Select(end => BeamEndSolver.Solve(
+                    geometry.Beam.Id.ToLong(),
+                    end,
+                    probe.Probe(geometry, end),
+                    options,
+                    geometry.LengthMm,
+                    geometry.WidthMm,
+                    geometry.AxisOffsetMm(end),
+                    geometry.AcrossAt(end).Least,
+                    geometry.AcrossAt(end).Most))
+                .ToList();
+        }
+
+        /// <summary>Takes off whatever the model already had at the ends about to be worked on.</summary>
+        private int ClearOld(BeamGeometry geometry, IEnumerable<BeamEndPlan> ends, IProgressSink progress)
+        {
+            var removed = 0;
+
+            foreach (var end in ends.Where(end => end.WillMove || end.NeedsCut))
             {
-                foreach (var end in plan.Ends)
+                try
                 {
-                    try
+                    var taken = BeamEndCutter.Clear(_document, geometry, end.End);
+                    if (taken > 0)
                     {
-                        var removed = BeamEndCutter.Clear(_document, plan.Geometry, end.End);
-                        if (removed > 0)
-                        {
-                            progress.Log($"id {end.BeamId} end {end.End}: took off {removed} old opening(s).");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        progress.Log($"id {end.BeamId} end {end.End}: could not clear the old opening - {ex.Message}");
+                        removed += taken;
+                        progress.Log($"id {end.BeamId} end {end.End}: took off {taken} old opening(s).");
                     }
                 }
+                catch (Exception ex)
+                {
+                    progress.Log($"id {end.BeamId} end {end.End}: could not clear the old opening - {ex.Message}");
+                }
             }
+
+            return removed;
+        }
+
+        /// <summary>Whether the beam's axis is anywhere other than the sweep before left it.</summary>
+        private bool Moved(FamilyInstance beam)
+        {
+            var line = (beam.Location as LocationCurve)?.Curve as Line;
+            if (line == null)
+            {
+                return false;
+            }
+
+            var now = new[] { line.GetEndPoint(0), line.GetEndPoint(1) };
+            var id = beam.Id.ToLong();
+
+            var changed = !_where.TryGetValue(id, out var was)
+                          || was[0].DistanceTo(now[0]).FeetToMm() > ToleranceMm
+                          || was[1].DistanceTo(now[1]).FeetToMm() > ToleranceMm;
+
+            _where[id] = now;
+            return changed;
         }
 
         /// <summary>Cuts the bearing blocks back where another beam has to come down past them.</summary>
         private void Notch(IEnumerable<BeamPlan> plans, AdjustResult result, IProgressSink progress)
         {
-            foreach (var plan in plans)
+            foreach (var plan in plans ?? Enumerable.Empty<BeamPlan>())
             {
                 try
                 {
@@ -293,29 +378,26 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         }
 
         /// <summary>
-        /// Checks the axes took their move, while the transaction is still open and before any cutting
-        /// starts. It separates a write Revit refused from a cut that pulled the beam back afterwards.
+        /// Checks the axis took its move, before any cutting starts. It separates a write Revit refused
+        /// from a cut that pulled the beam back afterwards.
         /// </summary>
-        private static void Confirm(IEnumerable<BeamPlan> plans, IProgressSink progress)
+        private static void Confirm(BeamPlan plan, IProgressSink progress)
         {
-            foreach (var plan in plans)
+            var line = (plan.Geometry.Beam.Location as LocationCurve)?.Curve as Line;
+            if (line == null)
             {
-                var line = (plan.Geometry.Beam.Location as LocationCurve)?.Curve as Line;
-                if (line == null)
-                {
-                    continue;
-                }
+                return;
+            }
 
-                foreach (var end in plan.Ends.Where(end => end.WillMove))
-                {
-                    var target = plan.Geometry.TargetAt(end.End, end.MoveMm);
-                    var held = line.GetEndPoint(end.End);
+            foreach (var end in plan.Ends.Where(end => end.WillMove))
+            {
+                var target = plan.Geometry.TargetAt(end.End, end.MoveMm);
+                var held = line.GetEndPoint(end.End);
 
-                    if (held.DistanceTo(target).FeetToMm() > ToleranceMm)
-                    {
-                        progress.Log($"id {end.BeamId} end {end.End}: the axis did not take the move - " +
-                                     $"wrote {Point(target)}, holds {Point(held)}");
-                    }
+                if (held.DistanceTo(target).FeetToMm() > ToleranceMm)
+                {
+                    progress.Log($"id {end.BeamId} end {end.End}: the axis did not take the move - " +
+                                 $"wrote {Point(target)}, holds {Point(held)}");
                 }
             }
         }
@@ -340,45 +422,70 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             }
         }
 
-        /// <summary>Squares off one skewed end with an opening.</summary>
+        /// <summary>
+        /// Squares off one skewed end with an opening for each plane it is trimmed back to. Nearly
+        /// always one; an end running into a corner has two, and each is reported on its own so that a
+        /// half-finished end cannot pass for a whole one.
+        /// </summary>
         private void Trim(BeamPlan plan, BeamEndPlan end, AdjustResult result, IProgressSink progress)
         {
-            try
+            foreach (var cut in end.Cuts)
             {
-                var refused = BeamEndCutter.Cut(_document, plan.Geometry, end);
+                try
+                {
+                    var opening = BeamEndCutter.Cut(_document, plan.Geometry, end, cut, out var refused);
 
-                if (refused == null)
-                {
-                    result.CutsCreated++;
-                    progress.Log($"id {end.BeamId} end {end.End}: cut square to {Describe(end)}, " +
-                                 $"{end.SkewDegrees:0.##} deg off, face at {end.CutPlaneMm:+0.#;-0.#;0} mm");
+                    if (refused == null)
+                    {
+                        result.CutsCreated++;
+                        Remember(end.BeamId, opening);
+                        progress.Log($"id {end.BeamId} end {end.End}: cut square to id {cut.AgainstId}, " +
+                                     $"{cut.SkewDegrees:0.##} deg off, face at {cut.PlaneMm:+0.#;-0.#;0} mm, " +
+                                     $"taking off {cut.DepthMm:0.#} mm");
+                    }
+                    else
+                    {
+                        result.CutsRefused++;
+                        progress.Log($"id {end.BeamId} end {end.End}: NOT cut although it wanted a " +
+                                     $"{cut.SkewDegrees:0.##} deg cut at {cut.PlaneMm:+0.#;-0.#;0} mm - {refused}");
+                    }
                 }
-                else
+                catch (Exception ex)
                 {
-                    result.CutsRefused++;
-                    progress.Log($"id {end.BeamId} end {end.End}: NOT cut although it wanted a " +
-                                 $"{end.SkewDegrees:0.##} deg cut at {end.CutPlaneMm:+0.#;-0.#;0} mm - {refused}");
+                    progress.Log($"id {end.BeamId} end {end.End}: the opening at " +
+                                 $"{cut.PlaneMm:+0.#;-0.#;0} mm could not be made - {ex.Message}");
                 }
-            }
-            catch (Exception ex)
-            {
-                progress.Log($"id {end.BeamId} end {end.End}: the opening could not be made - {ex.Message}");
             }
         }
 
+        private void Remember(long beamId, Opening opening)
+        {
+            if (opening == null)
+            {
+                return;
+            }
+
+            if (!_made.TryGetValue(beamId, out var openings))
+            {
+                openings = new List<ElementId>();
+                _made[beamId] = openings;
+            }
+
+            openings.Add(opening.Id);
+        }
+
         /// <summary>
-        /// Pass 4: read the beams back out of the model and compare where each end actually is with
-        /// where it was sent. Anything that did not arrive is reported rather than quietly counted as
-        /// done.
+        /// Reads the beams back out of the model and compares where each end actually is with where it
+        /// was sent. Anything that did not arrive is reported rather than quietly counted as done.
         /// </summary>
         private static void Check(IList<BeamPlan> plans, AdjustResult result, IProgressSink progress)
         {
             var moved = plans?.Where(plan => plan.HasMove).ToList();
             if (moved == null || moved.Count == 0)
             {
-                // The last round found nothing left to do, which is the run settling rather than the
-                // run failing - everything it wrote was checked by the round that wrote it.
-                progress.Log("The last round moved nothing: every end is where the rules put it.");
+                // The last sweep found nothing left to do, which is the run settling rather than the
+                // run failing - everything it wrote was checked by the sweep that wrote it.
+                progress.Log("The last sweep moved nothing: every end is where the rules put it.");
                 return;
             }
 

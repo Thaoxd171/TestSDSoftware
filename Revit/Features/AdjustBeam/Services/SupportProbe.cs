@@ -23,6 +23,16 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>How far the end may already reach into something before it is ignored.</summary>
         private const double BackReachMm = 600;
 
+        /// <summary>How far behind the end a support has to stop before the beam is done with it.</summary>
+        private const double BehindToleranceMm = 1;
+
+        /// <summary>
+        /// How far a wall's top may miss the beam's soffit and still count as carrying it. A bearing is
+        /// meant to be flush, so this is only there to keep a wall built exactly to the underside from
+        /// being called an obstruction by a rounding error.
+        /// </summary>
+        private const double BearingToleranceMm = 5;
+
         /// <summary>Sideways margin added to the search box around the ray.</summary>
         private const double SearchMarginMm = 600;
 
@@ -61,6 +71,20 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// would take a wedge off it longer than the beam is wide.
         /// </summary>
         private const double FacingTolerance = 0.5;
+
+        /// <summary>
+        /// How squarely a wall has to look back at the beam before its face is taken as the one the end
+        /// arrives at, when no face passes the ordinary test. Three tenths is seventy-two degrees off
+        /// square.
+        ///
+        /// It is there for a beam running into the corner where a wall ends: the wall's flank is then
+        /// the second face the end has to clear, and at 1855188 it stands 65 degrees off square, past
+        /// the ordinary limit. Left out, the wall reports no face at all and the end is squared off on
+        /// one plane where the model wants two. The gap either side of three tenths is wide - the next
+        /// thing down is a wall running alongside the beam at 87 degrees, which must stay out - so the
+        /// figure is not finely balanced.
+        /// </summary>
+        private const double GlancingTolerance = 0.3;
 
         /// <summary>
         /// How much of the beam's width a face has to stand across before it counts as one the beam
@@ -148,9 +172,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             // in need of setting right, and dropping the partner for being behind leaves the end with
             // nothing in front of it and no reason to come back. A wall, or a beam merely crossing this
             // one, is done with as soon as the end is clear of it.
+            //
+            // Clear of it, not resting against it. An end standing exactly on a wall's far face reads
+            // as far = 0, and dropping that one leaves the end to be pushed out by whatever lies beyond
+            // - 2975394 was driven 60 mm past where it belonged by the wall behind the one it was
+            // already touching. A support has to be a whole millimetre behind before the beam has
+            // really finished with it.
             if (candidate.Kind != SupportKind.Pillar
                 && candidate.Kind != SupportKind.InlineBeam
-                && candidate.FarMm <= 0)
+                && candidate.FarMm < -BehindToleranceMm)
             {
                 return $"ends {-candidate.FarMm:0.#} mm behind this end, the beam is already clear of it";
             }
@@ -173,14 +203,24 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// in that one stops at the top of the bearing block and the other carries on to the top of
         /// the beam.
         ///
-        /// Half the depth is the line, being the roundest one there is. The walls this was read off sit
-        /// at 470 and 416 mm below the beam top where the beam lands on them and 60 mm where it does
-        /// not, against a half depth of 385.
+        /// The underside of the beam is the line, and it is the only one that can be defended: a beam
+        /// rests on what it rests on, and anything standing higher than its soffit is in its way rather
+        /// than under it. A precast section carries a bearing block from the soffit up - 300 mm of it
+        /// on these beams - so a wall stopping part way up that block is not carrying anything, it is
+        /// fouling the block.
+        ///
+        /// This was first drawn at half the depth, off three walls reading 470, 416 and 60 mm below the
+        /// beam top. All three stood at one end - 1856700 END 1 - and the line was really only fitted
+        /// to what the reference model did there, which was to run the beam over the two low ones. That
+        /// model has since been changed to cut the beam against them instead, and nothing else measured
+        /// anywhere asks for a wall to be passed over for being low.
         /// </summary>
         private static bool SitsOver(SupportCandidate wall, BeamGeometry beam)
         {
+            var depth = (beam.TopZ - beam.BottomZ).FeetToMm();
+
             return wall.TopInTheWayMm.HasValue
-                   && wall.TopInTheWayMm.Value < -(beam.TopZ - beam.BottomZ).FeetToMm() / 2;
+                   && wall.TopInTheWayMm.Value < -depth + BearingToleranceMm;
         }
 
         /// <summary>Top and bottom of an element, measured up from the top of the beam.</summary>
@@ -275,6 +315,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 Description = Describe(neighbour),
                 TopAboveBeamMm = height.Top,
                 BottomAboveBeamMm = height.Bottom,
+                ThicknessMm = neighbour is Wall wall ? wall.Width.FeetToMm() : 0,
             };
 
             if (isColumn)
@@ -289,7 +330,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 var depth = (beam.TopZ - beam.BottomZ).FeetToMm();
                 candidate.RejectionReason =
                     $"where it stands in front of this end it stops {-candidate.TopInTheWayMm:0.#} mm " +
-                    $"below the top of the beam, more than half its {depth:0.#} depth, so the beam " +
+                    $"below the top of the beam, at or below the soffit {depth:0.#} down, so the beam " +
                     "lands on it and runs over it rather than up against it";
                 return candidate;
             }
@@ -297,13 +338,22 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var swept = Swept(solids, beam, neighbour, kind, origin, outward);
             candidate.ClearMm = swept.Count == 0 ? (double?)null : swept.Min().FeetToMm();
 
-            var entryFace = EntryFace(
-                UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ),
-                origin,
-                outward,
-                beam.WidthMm);
+            var upright = UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ);
+            var entryFace = EntryFace(upright, origin, outward, beam.WidthMm);
+
+            // A wall the beam meets at the corner where it ends shows the end nothing but its flank,
+            // and a flank stands too far off square to pass the ordinary test. Rather than let such a
+            // wall report no face at all, look again at a shallower angle - but only for a wall, and
+            // only when nothing squarer was found, so no end that already has a face changes its mind.
+            if (entryFace == null && kind == SupportKind.Wall)
+            {
+                entryFace = EntryFace(upright, origin, outward, beam.WidthMm, GlancingTolerance);
+            }
+
             var entry = entryFace == null ? null : -entryFace.FaceNormal;
             candidate.SkewDegrees = entry == null ? 0 : AngleBetween(outward, entry);
+            candidate.EntryAcross = entry == null ? 0 : AcrossShare(entry, outward);
+            candidate.InsideMm = InsideBand(entryFace, origin, outward, beam.WidthMm);
             candidate.EntryFaceMm = entryFace == null
                 ? (double?)null
                 : Crossing(entryFace, origin, outward)?.FeetToMm();
@@ -574,6 +624,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             candidate.NearMm = crossings.Min().FeetToMm();
             candidate.FarMm = crossings.Max().FeetToMm();
             candidate.SkewDegrees = AngleBetween(outward, normal);
+            candidate.EntryAcross = AcrossShare(normal, outward);
 
             var centre = pillar.GetLocationPoint();
             candidate.CentreAlongMm = centre == null
@@ -581,21 +632,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 : ((centre - origin).DotProduct(normal) / outward.DotProduct(normal)).FeetToMm();
 
             return candidate;
-        }
-
-        /// <summary>
-        /// The upright face of a support that the beam runs into, returned as a normal pointing the
-        /// way the beam travels. This is the plane a skewed end has to be cut parallel to, so the
-        /// cutter asks for it again when it builds the opening.
-        /// Null when the support has no upright face facing the beam.
-        /// </summary>
-        public static XYZ EntryNormal(Element support, XYZ origin, XYZ outward, double widthMm)
-        {
-            // No height band here, unlike the measuring above. This asks which plane a finished end is
-            // cut parallel to, and the answer is often a corbel pillar, which by design stops where the
-            // beam begins and stands entirely below it. Judging that face by whether it reaches the
-            // beam's own depth throws away every pillar there is, and the cut is quietly never made.
-            return EntryNormal(UprightFaces(support.GetSolids()), origin, outward, widthMm);
         }
 
         /// <summary>
@@ -621,7 +657,8 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             IList<PlanarFace> faces,
             XYZ origin,
             XYZ outward,
-            double widthMm)
+            double widthMm,
+            double facing = FacingTolerance)
         {
             var across = XYZ.BasisZ.CrossProduct(outward);
             var half = (widthMm / 2).MmToFeet();
@@ -629,7 +666,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var touching = InsideToleranceMm.MmToFeet();
 
             return faces
-                .Where(face => face.FaceNormal.DotProduct(outward) < -FacingTolerance)
+                .Where(face => face.FaceNormal.DotProduct(outward) < -facing)
                 .Where(face => Wide(face, origin, across, half, least, touching))
                 .Select(face => new { face, crossing = Crossing(face, origin, outward) })
                 .Where(item => item.crossing.HasValue)
@@ -784,6 +821,28 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
             var along = points.Select(point => point.DotProduct(outward)).ToList();
             return (along.Min(), along.Max());
+        }
+
+        /// <summary>How much of the beam's width a face stands across, in millimetres.</summary>
+        private static double InsideBand(PlanarFace face, XYZ origin, XYZ outward, double widthMm)
+        {
+            var across = XYZ.BasisZ.CrossProduct(outward);
+            if (face == null || across.IsZeroLength())
+            {
+                return 0;
+            }
+
+            return AcrossBeam(face, origin, across.Normalize(), (widthMm / 2).MmToFeet()).Inside.FeetToMm();
+        }
+
+        /// <summary>
+        /// How much of a direction lies across the beam rather than along it, signed. Zero for a face
+        /// met square; the sign says which side of the axis reaches it first.
+        /// </summary>
+        private static double AcrossShare(XYZ normal, XYZ outward)
+        {
+            var across = XYZ.BasisZ.CrossProduct(outward);
+            return across.IsZeroLength() ? 0 : normal.DotProduct(across.Normalize());
         }
 
         /// <summary>Angle between two directions, folded into 0-90 degrees.</summary>

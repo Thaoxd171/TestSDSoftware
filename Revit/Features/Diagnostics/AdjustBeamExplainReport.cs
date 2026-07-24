@@ -110,7 +110,7 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             var plan = BeamEndSolver.Solve(
                 geometry.Beam.Id.ToLong(), end, accepted, options, geometry.LengthMm, geometry.WidthMm,
-                geometry.AxisOffsetMm(end));
+                geometry.AxisOffsetMm(end), geometry.AcrossAt(end).Least, geometry.AcrossAt(end).Most);
 
             report.AppendLine();
             report.AppendLine($"    governing : {plan.Support}" +
@@ -131,9 +131,12 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             if (plan.NeedsCut)
             {
-                report.AppendLine($"    cut       : {plan.SkewDegrees:0.##} deg off square to id {plan.CutAgainstId}, " +
-                                  $"so the axis runs out to cover the face and an opening trims back to " +
-                                  $"{plan.CutPlaneMm:+0.##;-0.##;0} mm");
+                foreach (var cut in plan.Cuts)
+                {
+                    report.AppendLine($"    cut       : {cut.SkewDegrees:0.##} deg off square to id {cut.AgainstId}, " +
+                                      $"an opening trims back to {cut.PlaneMm:+0.##;-0.##;0} mm, " +
+                                      $"taking off {cut.DepthMm:0.##} mm");
+                }
             }
             else
             {

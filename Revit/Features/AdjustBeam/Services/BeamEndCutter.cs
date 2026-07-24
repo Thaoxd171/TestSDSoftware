@@ -45,73 +45,157 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         }
 
         /// <summary>
-        /// Cuts the wedge off one end. Returns null when the opening was made, or why it was not:
-        /// a cut the solver asked for and the cutter dropped has to be said out loud, because the end
-        /// then keeps the wedge the whole run was for and nothing else in the log would show it.
+        /// Trims one end back to one plane, returning the opening it made.
         /// </summary>
-        public static string Cut(Document document, BeamGeometry beam, BeamEndPlan plan)
+        /// <param name="refused">
+        /// Null when the opening was made, otherwise why it was not: a cut the solver asked for and the
+        /// cutter dropped has to be said out loud, because the end then keeps the wedge the whole run
+        /// was for and nothing else in the log would show it.
+        /// </param>
+        public static Opening Cut(
+            Document document,
+            BeamGeometry beam,
+            BeamEndPlan plan,
+            BeamEndCut cut,
+            out string refused)
         {
             var outward = beam.OutwardAt(plan.End);
-            var against = plan.CutAgainstId == 0 ? plan.SupportId : plan.CutAgainstId;
-            var support = document.GetElement(new ElementId(against));
+            var across = XYZ.BasisZ.CrossProduct(outward);
 
-            if (support == null)
+            if (across.IsZeroLength())
             {
-                return $"the support it is cut against (id {against}) is not in the model";
+                refused = "the beam stands upright, so there is no width to cut across";
+                return null;
             }
 
-            var normal = SupportProbe.EntryNormal(
-                support, beam.ProbeOriginAt(plan.End), outward, beam.WidthMm);
-
-            if (normal == null)
+            var profile = Profile(beam, plan, cut, outward, across.Normalize());
+            if (profile == null)
             {
-                return $"no face of id {against} looks back at this end to cut parallel to";
+                refused = $"the plane at {cut.PlaneMm:0.#} mm takes nothing off this end";
+                return null;
             }
 
-            // A point on the finished end face, sitting on the axis.
-            var planePoint = beam.PointAt(plan.End) + outward * plan.CutPlaneMm.Value.MmToFeet();
-
-            document.Create.NewOpening(
-                beam.Beam,
-                Profile(beam, plan, planePoint, normal),
-                Autodesk.Revit.Creation.eRefFace.CenterZ);
-            return null;
+            refused = null;
+            return document.Create.NewOpening(beam.Beam, profile, Autodesk.Revit.Creation.eRefFace.CenterZ);
         }
 
         /// <summary>
-        /// The rectangle to cut away: it starts on the finished end face and reaches past the far
-        /// corner of the square cut, wide enough to clear both sides of the beam. Sketched half way
-        /// down the beam because that is the reference face the opening is cut from.
+        /// What to take off the end: the part of it lying past the cut plane.
+        ///
+        /// Laid out on the beam's own axes rather than on the plane's, which is what lets two planes
+        /// share one end. A rectangle covering the whole end, margins and all, is clipped by the plane
+        /// and whatever is left over is the piece to remove - a wedge where one plane does the work, a
+        /// three-cornered sliver where a second one has already taken the rest.
+        ///
+        /// Sizing it by clipping rather than by the wedge also keeps a glancing plane in bounds: at 65
+        /// degrees off square the wedge is over a metre, and a rectangle that long would reach back
+        /// into the middle of the beam and cut away a good deal that was never in question.
+        ///
+        /// Sketched half way down the beam because that is the reference face the opening is cut from.
         /// </summary>
-        private static CurveArray Profile(BeamGeometry beam, BeamEndPlan plan, XYZ planePoint, XYZ normal)
+        private static CurveArray Profile(
+            BeamGeometry beam,
+            BeamEndPlan plan,
+            BeamEndCut cut,
+            XYZ outward,
+            XYZ across)
         {
-            var across = XYZ.BasisZ.CrossProduct(normal).Normalize();
-            var skew = plan.SkewDegrees * Math.PI / 180;
+            // The beam's own reach either side of its axis, not half its width each way: a precast
+            // section need not be centred on its line, and laying the opening out symmetrically leaves
+            // the far edge of a bearing block standing where the end was meant to be cut clean off.
+            var span = beam.AcrossAt(plan.End);
+            var least = span.Least - SideMarginMm;
+            var most = span.Most + SideMarginMm;
 
-            // The width is measured across the beam, but the opening is laid out along the cut plane,
-            // and a plane meeting the beam at an angle sees a wider section than the beam really is.
-            // Take the width as it stands and the cut falls short at both corners, leaving the two
-            // spikes the wedge was supposed to take off - and the further from square the end is, the
-            // further short it falls, so it is the very ends most in need of trimming that keep them.
-            var half = (beam.WidthMm / 2 / Math.Cos(skew) + SideMarginMm).MmToFeet();
-            var depth = (beam.WidthMm * Math.Tan(skew) + AlongMarginMm).MmToFeet();
+            // Where the plane crosses each side of that band. Far enough back that it has swept the
+            // whole width before the rectangle runs out, and far enough forward to clear the end of
+            // the beam wherever the axis was left.
+            var slope = cut.AcrossNormal / cut.AlongNormal;
+            var atLeast = cut.PlaneMm - slope * least;
+            var atMost = cut.PlaneMm - slope * most;
 
-            var origin = new XYZ(planePoint.X, planePoint.Y, beam.MiddleZ);
-            var corners = new[]
+            var back = Math.Min(atLeast, atMost) - AlongMarginMm;
+            var front = Math.Max(plan.MoveMm, Math.Max(atLeast, atMost)) + AlongMarginMm;
+
+            var corners = new List<XYZ>
             {
-                origin + across * half,
-                origin - across * half,
-                origin - across * half + normal * depth,
-                origin + across * half + normal * depth,
+                Local(beam, plan, outward, across, back, least),
+                Local(beam, plan, outward, across, front, least),
+                Local(beam, plan, outward, across, front, most),
+                Local(beam, plan, outward, across, back, most),
             };
 
-            var profile = new CurveArray();
-            for (var index = 0; index < corners.Length; index++)
+            var removed = Beyond(corners, beam, plan, cut, outward, across);
+            if (removed.Count < 3)
             {
-                profile.Append(Line.CreateBound(corners[index], corners[(index + 1) % corners.Length]));
+                return null;
             }
 
-            return profile;
+            var profile = new CurveArray();
+            for (var index = 0; index < removed.Count; index++)
+            {
+                var from = removed[index];
+                var to = removed[(index + 1) % removed.Count];
+
+                if (from.DistanceTo(to) > GeometryExtensions.Tolerance)
+                {
+                    profile.Append(Line.CreateBound(from, to));
+                }
+            }
+
+            return profile.Size < 3 ? null : profile;
+        }
+
+        /// <summary>A point so many millimetres out from the end and across from the axis.</summary>
+        private static XYZ Local(
+            BeamGeometry beam,
+            BeamEndPlan plan,
+            XYZ outward,
+            XYZ across,
+            double alongMm,
+            double acrossMm)
+        {
+            var point = beam.PointAt(plan.End) + outward * alongMm.MmToFeet() + across * acrossMm.MmToFeet();
+            return new XYZ(point.X, point.Y, beam.MiddleZ);
+        }
+
+        /// <summary>
+        /// The part of a polygon lying past the cut plane, found by walking its edges and keeping
+        /// whatever is on the far side, with the crossing points put in where an edge steps over.
+        /// </summary>
+        private static IList<XYZ> Beyond(
+            IList<XYZ> corners,
+            BeamGeometry beam,
+            BeamEndPlan plan,
+            BeamEndCut cut,
+            XYZ outward,
+            XYZ across)
+        {
+            var origin = Local(beam, plan, outward, across, cut.PlaneMm, 0);
+            var normal = (outward * cut.AlongNormal + across * cut.AcrossNormal).Normalize();
+
+            var kept = new List<XYZ>();
+
+            for (var index = 0; index < corners.Count; index++)
+            {
+                var from = corners[index];
+                var to = corners[(index + 1) % corners.Count];
+
+                var here = (from - origin).DotProduct(normal);
+                var there = (to - origin).DotProduct(normal);
+
+                if (here >= 0)
+                {
+                    kept.Add(from);
+                }
+
+                if (here > 0 != there > 0 && Math.Abs(here - there) > GeometryExtensions.Tolerance)
+                {
+                    kept.Add(from + (to - from) * (here / (here - there)));
+                }
+            }
+
+            return kept;
         }
 
         /// <summary>Openings this tool would own: hosted by the beam and sitting near that end.</summary>

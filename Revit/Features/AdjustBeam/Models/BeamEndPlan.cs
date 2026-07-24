@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
 {
@@ -54,7 +55,14 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         /// </summary>
         public long CutAgainstId { get; set; }
 
-        public bool NeedsCut => CutPlaneMm.HasValue && !IsSkipped;
+        /// <summary>
+        /// Every plane the end is trimmed back to, the governing one first. Empty on an end that comes
+        /// out square. <see cref="CutPlaneMm"/> and <see cref="SkewDegrees"/> describe the first of
+        /// them, which is the only one most ends have.
+        /// </summary>
+        public IList<BeamEndCut> Cuts { get; set; } = new List<BeamEndCut>();
+
+        public bool NeedsCut => Cuts.Count > 0 && !IsSkipped;
 
         /// <summary>Why nothing will be done. Null when the end is going to be adjusted.</summary>
         public string SkipReason { get; set; }

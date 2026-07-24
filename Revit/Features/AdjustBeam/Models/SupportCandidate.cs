@@ -51,6 +51,23 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         /// </summary>
         public double SkewDegrees { get; set; }
 
+        /// <summary>
+        /// Which way the face leans across the beam: the sideways part of the entry normal, as a
+        /// fraction of one. Zero on a face met square, and it grows with the skew - but unlike
+        /// <see cref="SkewDegrees"/> it is signed, and the sign is which corner of the end reaches the
+        /// face first. Two faces meeting at a corner lean opposite ways, and that is what lets the two
+        /// of them between them take off the whole of a square end.
+        /// </summary>
+        public double EntryAcross { get; set; }
+
+        /// <summary>
+        /// How much of the beam's width the face it arrives at actually stands across. A support
+        /// squarely in the way covers most of it; one the end merely clips the corner of covers a
+        /// sliver, and a sliver is not something to hold a full clearance off in a crowded joint.
+        /// Zero when no face of it looks back at this end.
+        /// </summary>
+        public double InsideMm { get; set; }
+
         /// <summary>Top of the support, measured up from the top of the beam.</summary>
         public double TopAboveBeamMm { get; set; }
 
@@ -64,6 +81,17 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         /// where it is a nib the beam lands on. Null when none of it is in front of the end.
         /// </summary>
         public double? TopInTheWayMm { get; set; }
+
+        /// <summary>
+        /// How thick the support is in its own right. Only walls carry one, and it is there to be
+        /// compared with how much material the beam actually meets: a beam crossing a solid wall meets
+        /// its full thickness, and meeting markedly less means the wall has been opened up to let the
+        /// beam through. Zero when the support is not a wall or its thickness cannot be read.
+        /// </summary>
+        public double ThicknessMm { get; set; }
+
+        /// <summary>How much of the support the beam passes through, from where it starts to where it ends.</summary>
+        public double SpanMm => FarMm - NearMm;
 
         /// <summary>Family and type, for the report.</summary>
         public string Description { get; set; }
