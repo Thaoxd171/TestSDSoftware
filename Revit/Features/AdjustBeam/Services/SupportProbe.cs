@@ -173,13 +173,14 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// in that one stops at the top of the bearing block and the other carries on to the top of
         /// the beam.
         ///
-        /// Half the depth is the line, being the roundest one there is. The four walls this was read
-        /// off sit at 470 and 416 mm below the beam top on the bearing side and 60 mm on the other,
-        /// against a half depth of 385.
+        /// Half the depth is the line, being the roundest one there is. The walls this was read off sit
+        /// at 470 and 416 mm below the beam top where the beam lands on them and 60 mm where it does
+        /// not, against a half depth of 385.
         /// </summary>
         private static bool SitsOver(SupportCandidate wall, BeamGeometry beam)
         {
-            return wall.TopAboveBeamMm < -(beam.TopZ - beam.BottomZ).FeetToMm() / 2;
+            return wall.TopInTheWayMm.HasValue
+                   && wall.TopInTheWayMm.Value < -(beam.TopZ - beam.BottomZ).FeetToMm() / 2;
         }
 
         /// <summary>Top and bottom of an element, measured up from the top of the beam.</summary>
@@ -189,6 +190,40 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return box == null
                 ? (0, 0)
                 : ((box.Max.Z - beam.TopZ).FeetToMm(), (box.Min.Z - beam.TopZ).FeetToMm());
+        }
+
+        /// <summary>
+        /// How high the support stands where it is actually in front of this end, measured up from the
+        /// top of the beam. Null when none of it is.
+        ///
+        /// A wall is one element from end to end but is not one height: 1662890 is built to the top of
+        /// the storey along most of its length and stops at the beam's soffit for the last half metre,
+        /// which is a bearing nib with the beam running over it. Read off the whole wall's bounding box
+        /// that reads as full height, and the beam is stopped dead at a wall it is meant to land on.
+        /// </summary>
+        private static double? TopInTheWay(IList<Solid> solids, BeamGeometry beam, XYZ origin, XYZ outward)
+        {
+            var across = XYZ.BasisZ.CrossProduct(outward);
+            if (across.IsZeroLength())
+            {
+                return null;
+            }
+
+            var half = (beam.WidthMm / 2).MmToFeet();
+            var reach = ForwardReachMm.MmToFeet();
+            var back = BackReachMm.MmToFeet();
+
+            var tops = solids
+                .PointsInSlab(point => (point - origin).DotProduct(across.Normalize()), -half, half)
+                .Where(point =>
+                {
+                    var along = (point - origin).DotProduct(outward);
+                    return along >= -back && along <= reach;
+                })
+                .Select(point => point.Z)
+                .ToList();
+
+            return tops.Count == 0 ? (double?)null : (tops.Max() - beam.TopZ).FeetToMm();
         }
 
         /// <summary>Everything of a supporting category whose bounding box meets the search box.</summary>
@@ -247,12 +282,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 return MeasurePillar(candidate, neighbour, solids, origin, outward, beam.WidthMm);
             }
 
+            candidate.TopInTheWayMm = TopInTheWay(solids, beam, origin, outward);
+
             if (kind == SupportKind.Wall && SitsOver(candidate, beam))
             {
                 var depth = (beam.TopZ - beam.BottomZ).FeetToMm();
                 candidate.RejectionReason =
-                    $"its top stops {-candidate.TopAboveBeamMm:0.#} mm below the top of the beam, less " +
-                    $"than half its {depth:0.#} depth, so the beam sits over it rather than up against it";
+                    $"where it stands in front of this end it stops {-candidate.TopInTheWayMm:0.#} mm " +
+                    $"below the top of the beam, more than half its {depth:0.#} depth, so the beam " +
+                    "lands on it and runs over it rather than up against it";
                 return candidate;
             }
 

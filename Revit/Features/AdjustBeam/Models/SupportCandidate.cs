@@ -57,6 +57,14 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         /// <summary>Bottom of the support, measured up from the top of the beam.</summary>
         public double BottomAboveBeamMm { get; set; }
 
+        /// <summary>
+        /// How high the support reaches where it stands in front of this end, measured up from the top
+        /// of the beam. Not the same as <see cref="TopAboveBeamMm"/>, which covers the whole element: a
+        /// wall can be full height along its length and stop at the beam's soffit for the last stretch,
+        /// where it is a nib the beam lands on. Null when none of it is in front of the end.
+        /// </summary>
+        public double? TopInTheWayMm { get; set; }
+
         /// <summary>Family and type, for the report.</summary>
         public string Description { get; set; }
 

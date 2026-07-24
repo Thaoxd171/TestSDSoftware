@@ -959,6 +959,14 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
 
             var all = inside.Min(point => (point - origin).DotProduct(outward)).FeetToMm();
 
+            // Only the material around the contact. A wall running diagonally across the span is one
+            // element from end to end, and everything of it inside the beam's width counts as "in the
+            // way" however far down the beam it lies - which turns a reading meant to describe the
+            // contact into a reading about the whole wall.
+            var nearest = inside
+                .Where(point => (point - origin).DotProduct(outward).FeetToMm() < all + beam.WidthMm)
+                .ToList();
+
             var web = other.Section == null
                 ? inside
                 : inside.Where(point => !other.Section.IsBeyondWeb(point)).ToList();
@@ -967,8 +975,24 @@ namespace SDSoftware.RevitTest.Features.Diagnostics
                 ? "(nothing but block)"
                 : $"{web.Min(point => (point - origin).DotProduct(outward)).FeetToMm():+0.#;-0.#;0}";
 
+            // How high the material in the way stands, not how high the whole element does. A wall can
+            // be storey height along its length and stop at the beam's soffit for the last stretch,
+            // where it is a nib the beam lands on, and only this reading tells the two apart.
+            var top = (nearest.Max(point => point.Z) - beam.TopZ).FeetToMm();
+            var bottom = (nearest.Min(point => point.Z) - beam.TopZ).FeetToMm();
+
+            // And how much of the beam's width it takes up. Not the width of the face the beam arrives
+            // at, which the limits already report: a wall met end-on presents a face running its whole
+            // length, and the beam can still be clipping nothing but a corner of the material behind
+            // that face. The two readings are the difference between running into something and
+            // brushing past it.
+            var offsets = nearest.Select(point => (point - origin).DotProduct(across.Normalize())).ToList();
+            var covers = (offsets.Max() - offsets.Min()).FeetToMm();
+
             report.AppendLine($"    touches at {all:+0.#;-0.#;0} counting the bearing block, " +
-                              $"{withoutBlock} without it");
+                              $"{withoutBlock} without it   " +
+                              $"at the contact it stands {bottom:0.#} to {top:0.#} from the beam top " +
+                              $"and takes up {covers:0.#} of the {beam.WidthMm:0.#} across");
 
             if (web.Count > 0)
             {
