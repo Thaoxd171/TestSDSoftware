@@ -1,12 +1,11 @@
 # SD Revit Test
 
-Revit add-in submitted for the SD Software technical test. It adds a **SD Software** ribbon tab with three tools:
+Revit add-in submitted for the SD Software technical test. It adds a **SD Software** ribbon tab with two tools:
 
 | Tool | What it does |
 |---|---|
 | **Bearing Plate** | Generates bearing plate detail drawings automatically — creates the detail views, dimensions and tags, then places them on sheets. |
 | **Adjust Beam** | Trims and extends beams so every end keeps the clearance you set from the wall, pillar or beam it runs into. |
-| **Spiral Stair** | Builds a spiral staircase from a few parameters (radius, total height, riser count, sweep angle, run width, rotation direction). |
 
 ## Demo videos
 
@@ -14,7 +13,6 @@ Revit add-in submitted for the SD Software technical test. It adds a **SD Softwa
 |---|---|
 | Bearing Plate | _(link)_ |
 | Adjust Beam | _(link)_ |
-| Spiral Stair | _(link)_ |
 
 ## Requirements
 
@@ -69,8 +67,7 @@ Revit/
 ├─ Extensions/    Extension methods over the Revit API (document, element, geometry, units, views)
 ├─ Features/
 │   ├─ BearingPlate/   Cmd · Models · Services · ViewModels · Views
-│   ├─ AdjustBeam/     Cmd · Models · Services · ViewModels · Views
-│   └─ SpiralStair/    Cmd · Models · Services · ViewModels · Views
+│   └─ AdjustBeam/     Cmd · Models · Services · ViewModels · Views
 ├─ Settings/      JSON persistence of the last used inputs
 └─ Resources/     Ribbon icons
 ```
