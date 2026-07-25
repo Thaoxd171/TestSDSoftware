@@ -39,7 +39,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
             AlongX = DistinctAlong(instances, p => p.X);
             AlongY = DistinctAlong(instances, p => p.Y);
 
-            IsOutline = SpansThePlate(points, plateBox);
+            IsOutline = IsPlateItself(name);
         }
 
         public string Name { get; }
@@ -75,8 +75,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
         public bool HasHeight => Height > FlatTolerance;
 
         /// <summary>
-        /// True for the part whose markers sit on the corners of the plate - that is the plate
-        /// itself, and it is what the overall dimensions measure.
+        /// True for the data device that stands in for the plate itself rather than a part on it.
+        /// Its marker is drawn the size of the whole plate, so the overall dimensions measure it and
+        /// the location chains skip it.
         /// </summary>
         public bool IsOutline { get; }
 
@@ -108,19 +109,21 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Models
             return kept;
         }
 
-        private static bool SpansThePlate(IReadOnlyList<XYZ> points, BoundingBoxXYZ plateBox)
+        /// <summary>True for a hole through the plate ("Hul" is Danish for hole).</summary>
+        public bool IsHole => Name != null && Name.IndexOf("Hul", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>True for a part standing proud of the plate, such as a welded stud.</summary>
+        public bool IsStud => !IsOutline && !IsHole;
+
+        /// <summary>
+        /// True for the data device that stands in for the plate rather than a part on it. These are
+        /// annotation families with no solid and no model bounding box to measure, so they cannot be
+        /// told apart by geometry; the plate's own device is the one named after the plate ("Plade"
+        /// is Danish for plate), which is the name this component library gives it.
+        /// </summary>
+        private static bool IsPlateItself(string name)
         {
-            if (plateBox == null || points.Count < 2)
-            {
-                return false;
-            }
-
-            var tolerance = 2.0.MmToFeet();
-            var spansX = points.Max(p => p.X) - points.Min(p => p.X);
-            var spansY = points.Max(p => p.Y) - points.Min(p => p.Y);
-
-            return Math.Abs(spansX - (plateBox.Max.X - plateBox.Min.X)) < tolerance
-                   && Math.Abs(spansY - (plateBox.Max.Y - plateBox.Min.Y)) < tolerance;
+            return name != null && name.TrimStart().StartsWith("Plade", StringComparison.OrdinalIgnoreCase);
         }
     }
 }

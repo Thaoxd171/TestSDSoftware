@@ -19,11 +19,17 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         public const string ThreeDName = "3D Ortho";
 
         /// <summary>
-        /// Clearance kept in front of and behind the assembly. Revit's default section depth is
-        /// shallow enough to cut off the parts sitting under the plate, and anything clipped away
-        /// counts as not visible - it cannot be tagged and does not print.
+        /// Clearance kept in front of and behind the assembly along the view direction. Anything
+        /// clipped away counts as not visible - it cannot be tagged and does not print.
         /// </summary>
         private const double DepthClearanceMm = 50.0;
+
+        /// <summary>
+        /// Margin kept around the assembly in the plane of the view, leaving room for the dimensions
+        /// and tags that sit outside the plate. These two numbers reproduce the section boxes measured
+        /// on the reference drawings exactly.
+        /// </summary>
+        private const double InPlaneMarginMm = 350.0;
 
         private readonly Document _document;
 
@@ -57,46 +63,113 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
 
         private View CreateDetail(ElementId assemblyId, AssemblyDetailViewOrientation orientation, ElementId templateId, string name)
         {
+            // every assembly owns a view called "Plan" and "Front", so the section-line "viewer"
+            // element cannot be found by name once there is more than one plate. Snapshot the viewers
+            // before and after creating this section; the new one belongs to this view.
+            var before = ViewerIds();
             var view = AssemblyViewUtils.CreateDetailSection(_document, assemblyId, orientation);
+            _document.Regenerate();
+            var viewers = ViewerIds().Where(id => !before.Contains(id)).ToList();
+
             Rename(view, name);
             ApplyTemplate(view, templateId);
-            FitFarClip(view, assemblyId);
+            FitCrop(view, viewers, assemblyId);
             return view;
         }
 
-        /// <summary>
-        /// Opens the section deep enough to reach past the whole assembly.
-        ///
-        /// The depth is measured from the view's own plane, not from the assembly: Revit can place
-        /// that plane far away, and a far clip sized only to the assembly would then cut everything
-        /// out of the drawing.
-        /// </summary>
-        private void FitFarClip(View view, ElementId assemblyId)
+        private HashSet<ElementId> ViewerIds()
         {
-            var offset = view?.get_Parameter(BuiltInParameter.VIEWER_BOUND_OFFSET_FAR);
-            if (offset == null || offset.IsReadOnly)
-            {
-                return;
-            }
+            return new FilteredElementCollector(_document)
+                .OfCategory(BuiltInCategory.OST_Viewers)
+                .WhereElementIsNotElementType()
+                .ToElementIds()
+                .ToHashSet();
+        }
 
+        /// <summary>
+        /// Shrinks the section down to the plate. Revit opens a new detail section on a huge default
+        /// box whose cutting plane sits far from the plate, which throws the section line a long way
+        /// off in the other views and cuts an enormous depth. This moves the cutting plane just in
+        /// front of the plate, crops the drawing to it with a margin for the annotation, and sets the
+        /// far clip to the plate's depth - the same section box the reference drawings use.
+        ///
+        /// The depth is driven by the far clip parameter, not the crop box: Revit ignores the crop
+        /// box's own depth, so that has to be set on its own.
+        /// </summary>
+        private void FitCrop(View view, IList<ElementId> viewers, ElementId assemblyId)
+        {
             var box = BoundsOf(assemblyId);
-            if (box == null)
+            if (view == null || box == null)
             {
                 return;
             }
 
-            // ViewDirection points towards the viewer, so depth into the drawing runs the other way
-            var into = view.ViewDirection.Negate();
-            var origin = view.Origin;
-            var depth = Corners(box).Max(corner => (corner - origin).DotProduct(into));
+            var margin = InPlaneMarginMm.MmToFeet();
+            var clearance = DepthClearanceMm.MmToFeet();
+            var viewDir = view.ViewDirection;
 
-            if (depth <= 0)
+            // Revit ignores a moved crop-box transform, so the whole section is slid along its view
+            // direction until the cutting plane sits a clearance in front of the nearest face of the
+            // plate. ViewDirection points towards the viewer, so the nearest face is the furthest one
+            // along it. This is what puts the section line next to the plate in the other views.
+            // The view has to be regenerated first, otherwise the move is silently dropped.
+            _document.Regenerate();
+            var target = Corners(box).Max(corner => corner.DotProduct(viewDir)) + clearance;
+            var shift = (target - view.Origin.DotProduct(viewDir)) * viewDir;
+            if (!shift.IsZeroLength())
             {
-                // the assembly sits behind the view plane; leave Revit's default alone
-                return;
+                // the section line is a separate "viewer" element; moving the view on its own leaves
+                // that mark behind, so the view and its own viewers are moved together - the same as
+                // selecting both by hand before dragging
+                var ids = new List<ElementId> { view.Id };
+                ids.AddRange(viewers ?? new List<ElementId>());
+
+                try
+                {
+                    ElementTransformUtils.MoveElements(_document, ids, shift);
+                    _document.Regenerate();
+                }
+                catch (Exception)
+                {
+                    // the section refused to move; the crop and far clip below still trim it
+                }
             }
 
-            offset.Set(depth + DepthClearanceMm.MmToFeet());
+            // in-plane crop around the plate, measured from wherever the section ended up
+            var crop = view.CropBox;
+            var toLocal = crop.Transform.Inverse;
+            var local = Corners(box).Select(toLocal.OfPoint).ToList();
+
+            crop.Min = new XYZ(local.Min(p => p.X) - margin, local.Min(p => p.Y) - margin, local.Min(p => p.Z) - clearance);
+            crop.Max = new XYZ(local.Max(p => p.X) + margin, local.Max(p => p.Y) + margin, local.Max(p => p.Z) + clearance);
+
+            // the crop box is set but left inactive, exactly as the reference drawings have it: the
+            // far clip trims the depth and the assembly scopes the view, so the viewport takes the
+            // size of its content rather than the whole crop, which keeps a tall plan from pushing the
+            // front off the sheet
+            view.CropBox = crop;
+            view.CropBoxActive = false;
+            view.CropBoxVisible = false;
+
+            // far clip reaches from the cutting plane to the back of the plate, plus a clearance
+            var into = viewDir.Negate();
+            var far = Corners(box).Max(corner => (corner - view.Origin).DotProduct(into)) + clearance;
+            SetClip(view, BuiltInParameter.VIEWER_BOUND_ACTIVE_FAR, BuiltInParameter.VIEWER_BOUND_OFFSET_FAR, far);
+        }
+
+        private static void SetClip(View view, BuiltInParameter active, BuiltInParameter offset, double value)
+        {
+            var isActive = view.get_Parameter(active);
+            if (isActive != null && !isActive.IsReadOnly)
+            {
+                isActive.Set(1);
+            }
+
+            var far = view.get_Parameter(offset);
+            if (far != null && !far.IsReadOnly)
+            {
+                far.Set(value);
+            }
         }
 
         private static IEnumerable<XYZ> Corners(BoundingBoxXYZ box)

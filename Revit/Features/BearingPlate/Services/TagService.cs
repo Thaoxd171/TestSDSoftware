@@ -57,13 +57,17 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 step: new XYZ(-step, 0, 0),
                 orientation: TagOrientation.Vertical);
 
-            PlaceCluster(result, view, tagType, components,
+            // the tags down the left side carry names of different lengths; the reference drawings line
+            // their right edges up rather than their left, so the long ones reach further out
+            var column = PlaceCluster(result, view, tagType, components,
                 start: new XYZ(box.Min.X - side, box.Min.Y - side, box.Max.Z),
                 step: new XYZ(0, -step, 0),
                 orientation: TagOrientation.Horizontal);
 
+            RightAlign(column, view);
+
             PlaceLabel(result, view, labelType,
-                new XYZ(box.Min.X, box.Min.Y - LabelOffsetMm.MmToFeet(), box.Max.Z),
+                new XYZ(box.Min.X, box.Min.Y - (LabelOffsetMm / 2).MmToFeet(), box.Max.Z),
                 AssemblyViewBuilder.PlanName);
 
             return result;
@@ -85,17 +89,30 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             }
 
             var step = StepMm.MmToFeet();
-            var side = SideOffsetMm.MmToFeet();
             var end = EndOffsetMm.MmToFeet();
 
-            // down the side of an elevation only the parts that stand proud of the plate are worth
-            // listing; a hole through it has no height of its own to call out here
-            PlaceCluster(result, view, tagType, components.Where(c => c.HasHeight).ToList(),
-                start: new XYZ(box.Min.X - side, box.Max.Y, box.Max.Z + end),
-                step: new XYZ(-step, 0, 0),
+            // the two dimensions down the left side each get a tag above them: the stud on the
+            // breakdown of plate thickness and stud length, the plate on the overall height. The
+            // markers all sit flat on the plate, so height cannot tell them apart - the roles do.
+            var stud = components.FirstOrDefault(c => c.IsStud);
+            var outline = components.FirstOrDefault(c => c.IsOutline);
+            var sideTags = new[] { stud, outline }.Where(c => c != null).ToList();
+
+            // the markers are placed rotated 90 degrees and this tag family turns with its host, so the
+            // orientations are the mirror of how they read: Vertical here comes out upright, which is
+            // what the reference drawings use for the two tags above the side dimensions
+            PlaceCluster(result, view, tagType, sideTags,
+                start: new XYZ(box.Min.X - 2 * step, box.Max.Y, box.Max.Z + (StepMm / 4).MmToFeet()),
+                step: new XYZ(step, 0, 0),
                 orientation: TagOrientation.Vertical);
 
-            PlaceCluster(result, view, tagType, components,
+            // the rows read top to bottom Ø24, Ø11, stud, overall, so the tags climbing the right edge
+            // must match: overall nearest the plate, then the parts in the reverse of the plan order
+            var rowOrder = components.Where(c => c.IsOutline)
+                .Concat(components.Where(c => !c.IsOutline).Reverse())
+                .ToList();
+
+            PlaceCluster(result, view, tagType, rowOrder,
                 start: new XYZ(box.Max.X + end, box.Max.Y, box.Max.Z + step),
                 step: new XYZ(0, 0, step),
                 orientation: TagOrientation.Horizontal);
@@ -107,7 +124,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             return result;
         }
 
-        private void PlaceCluster(
+        private List<IndependentTag> PlaceCluster(
             AnnotationResult result,
             View view,
             FamilySymbol tagType,
@@ -116,10 +133,12 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             XYZ step,
             TagOrientation orientation)
         {
+            var placed = new List<IndependentTag>();
+
             if (tagType == null)
             {
                 result.Note("no tag type available");
-                return;
+                return placed;
             }
 
             tagType.EnsureActive();
@@ -138,20 +157,61 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
 
                 try
                 {
-                    IndependentTag.Create(
+                    placed.Add(IndependentTag.Create(
                         _document,
                         tagType.Id,
                         view.Id,
                         new Reference(target),
                         addLeader: false,
                         orientation,
-                        start + step * index);
+                        start + step * index));
                     result.Success();
                 }
                 catch (Exception ex)
                 {
                     result.Failure(component.Name, ex.Message);
                 }
+            }
+
+            return placed;
+        }
+
+        /// <summary>
+        /// Lines a column of tags up by their right edge instead of the point they were placed at, so
+        /// longer names reach further out rather than crowding the drawing. Their real widths are read
+        /// back from the view, so it works whatever the names turn out to be.
+        /// </summary>
+        private void RightAlign(IList<IndependentTag> tags, View view)
+        {
+            if (tags.Count < 2)
+            {
+                return;
+            }
+
+            _document.Regenerate();
+
+            var edges = tags
+                .Select(t => t.get_BoundingBox(view))
+                .Where(b => b != null)
+                .Select(b => b.Max.X)
+                .ToList();
+
+            if (edges.Count == 0)
+            {
+                return;
+            }
+
+            var rightEdge = edges.Min();
+
+            foreach (var tag in tags)
+            {
+                var box = tag.get_BoundingBox(view);
+                if (box == null)
+                {
+                    continue;
+                }
+
+                tag.TagHeadPosition += new XYZ(rightEdge - box.Max.X, 0, 0);
             }
         }
 

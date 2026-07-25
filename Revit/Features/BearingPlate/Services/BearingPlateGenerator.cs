@@ -22,6 +22,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         public const string DrawingStep = "Create bearing plate drawings";
         public const string SheetStep = "Place drawings on sheets";
 
+        /// <summary>Gap kept above the tables and below the title-block edge when centring the views.</summary>
+        private const double DrawingAreaMarginMm = 12.0;
+
         private readonly Document _document;
         private readonly TemplateCatalog _catalog;
         private readonly AssemblyBuilder _assemblies;
@@ -53,20 +56,22 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                          $"{Name(_catalog.DefaultFrontTemplate)} / {Name(_catalog.DefaultThreeDTemplate)}");
             progress.Log($"Tag: {Name(_catalog.ComponentTagType)}   Label text: {Name(_catalog.LabelTextType)}");
 
-            using (var group = new TransactionGroup(_document, "Generate bearing plate drawings"))
+            // everything runs in a single transaction so the whole generation is one undo step; each
+            // plate is isolated inside its own SubTransaction, which rolls back alone if it fails
+            using (var transaction = new Transaction(_document, "Generate bearing plate drawings"))
             {
-                group.Start();
+                transaction.Start();
 
                 if (!EnsureAssemblies(plates, progress))
                 {
-                    group.RollBack();
+                    transaction.RollBack();
                     return new List<GenerationResult>();
                 }
 
                 var drawings = CreateDrawings(plates, options, progress);
                 PlaceOnSheets(drawings, options, progress);
 
-                group.Assimilate();
+                transaction.Commit();
                 return drawings.Select(d => d.Result).Where(r => r != null).ToList();
             }
         }
@@ -86,34 +91,27 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 return true;
             }
 
-            using (var transaction = new Transaction(_document, "Create isolated assemblies"))
+            // runs inside the shared transaction; a plate that cannot be isolated is logged and skipped
+            for (var index = 0; index < missing.Count; index++)
             {
-                transaction.Start();
-
-                for (var index = 0; index < missing.Count; index++)
+                if (progress.IsCancelled)
                 {
-                    if (progress.IsCancelled)
-                    {
-                        transaction.RollBack();
-                        return false;
-                    }
-
-                    var plate = missing[index];
-
-                    try
-                    {
-                        _assemblies.EnsureAssembly(plate);
-                        progress.Log($"{plate.Name}: assembly created");
-                    }
-                    catch (Exception ex)
-                    {
-                        progress.Log($"{plate.Name}: could not create assembly - {ex.Message}");
-                    }
-
-                    progress.Report(AssemblyStep, (index + 1) / (double)missing.Count);
+                    return false;
                 }
 
-                transaction.Commit();
+                var plate = missing[index];
+
+                try
+                {
+                    _assemblies.EnsureAssembly(plate);
+                    progress.Log($"{plate.Name}: assembly created");
+                }
+                catch (Exception ex)
+                {
+                    progress.Log($"{plate.Name}: could not create assembly - {ex.Message}");
+                }
+
+                progress.Report(AssemblyStep, (index + 1) / (double)missing.Count);
             }
 
             return true;
@@ -174,9 +172,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         {
             var plate = drawing.Plate;
 
-            using (var transaction = new Transaction(_document, "Draw " + plate.Name))
+            using (var sub = new SubTransaction(_document))
             {
-                transaction.Start();
+                sub.Start();
 
                 try
                 {
@@ -188,14 +186,14 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
 
                     var report = Annotate(drawing, options);
 
-                    transaction.Commit();
+                    sub.Commit();
                     progress.Log($"{plate.Name}: {drawing.ViewCount} view(s){report}");
                 }
                 catch (Exception ex)
                 {
-                    if (transaction.HasStarted())
+                    if (sub.HasStarted())
                     {
-                        transaction.RollBack();
+                        sub.RollBack();
                     }
 
                     drawing.Reset();
@@ -244,7 +242,7 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
             {
                 var type = _catalog.LinearDimensionType;
                 var dimPlan = _dimensions.DimensionPlan(drawing.Plan, plate, components, type);
-                var dimFront = _dimensions.DimensionFront(drawing.Front, plate, type);
+                var dimFront = _dimensions.DimensionFront(drawing.Front, plate, components, type);
 
                 drawing.Dimensions = dimPlan.Placed + dimFront.Placed;
                 report += $", dims {dimPlan.Describe(AssemblyViewBuilder.PlanName)} " +
@@ -278,9 +276,9 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
         {
             var plate = drawing.Plate;
 
-            using (var transaction = new Transaction(_document, "Sheet " + plate.Name))
+            using (var sub = new SubTransaction(_document))
             {
-                transaction.Start();
+                sub.Start();
 
                 try
                 {
@@ -299,12 +297,28 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                     // plan sits on its bottom anchor, front stacks above it, 3D hangs in the top-right
                     var planViewport = _sheets.PlaceViewAnchoredBottom(sheet, drawing.Plan, corner, layout.ViewCentreX, layout.PlanBottomY);
                     var frontBottom = _sheets.GetTopEdgeMm(planViewport, corner) + layout.FrontGapY;
-                    _sheets.PlaceViewAnchoredBottom(sheet, drawing.Front, corner, layout.ViewCentreX, frontBottom);
-                    _sheets.PlaceViewAnchoredTopRight(sheet, drawing.ThreeD, corner, layout.ThreeDTopRight.X, layout.ThreeDTopRight.Y);
+                    var frontViewport = _sheets.PlaceViewAnchoredBottom(sheet, drawing.Front, corner, layout.ViewCentreX, frontBottom);
+                    var threeDViewport = _sheets.PlaceViewAnchoredTopRight(sheet, drawing.ThreeD, corner, layout.ThreeDTopRight.X, layout.ThreeDTopRight.Y);
 
+                    // the schedules go on first so the free drawing area can be measured from what is
+                    // actually on the sheet
                     PlaceSchedules(sheet, schedules, corner, layout);
 
-                    transaction.Commit();
+                    // lay the plan and front out inside the free part of the sheet: on A4 that is the
+                    // gap above the material tables (full width); on A3 it is the left of the tables,
+                    // which sit in the right half. The rectangle is read back from what is actually on
+                    // the sheet, then the views are measured and fitted to it, clear of the 3D.
+                    try
+                    {
+                        LayoutViews(sheet, corner, layout, planViewport, frontViewport, threeDViewport, plate.Name, progress);
+                    }
+                    catch (Exception ex)
+                    {
+                        // layout is a nicety; never let it lose the whole sheet
+                        progress.Log($"{plate.Name}: layout skipped - {ex.Message}");
+                    }
+
+                    sub.Commit();
 
                     drawing.Result = new GenerationResult
                     {
@@ -320,14 +334,47 @@ namespace SDSoftware.RevitTest.Features.BearingPlate.Services
                 }
                 catch (Exception ex)
                 {
-                    if (transaction.HasStarted())
+                    if (sub.HasStarted())
                     {
-                        transaction.RollBack();
+                        sub.RollBack();
                     }
 
                     drawing.Result = GenerationResult.Failed(plate.Name, ex.Message);
                     progress.Log($"{plate.Name}: FAILED - {ex.Message}");
                 }
+            }
+        }
+
+        /// <summary>
+        /// Builds the drawing-area rectangle for this paper size and hands it to the layout solver.
+        /// A4: the views share the full width above the tables. A3: they take the width to the left of
+        /// the tables, over the full height. Either way the 3D stays where it was anchored and the
+        /// plan and front are fitted around it.
+        /// </summary>
+        private void LayoutViews(
+            ViewSheet sheet, XYZ corner, SheetLayout layout,
+            Viewport plan, Viewport front, Viewport threeD, string plateName, IProgressSink progress)
+        {
+            var top = _sheets.FrameTopMm(sheet, corner) - DrawingAreaMarginMm;
+
+            double left, right, bottom;
+            if (layout.Format == SheetFormat.A4Portrait)
+            {
+                left = 0;
+                right = _sheets.FrameWidthMm(sheet, corner);
+                bottom = _sheets.TopOfContentMm(sheet, corner) + DrawingAreaMarginMm;
+            }
+            else
+            {
+                left = 0;
+                right = _sheets.LeftOfContentMm(sheet, corner) - DrawingAreaMarginMm;
+                bottom = layout.PlanBottomY;
+            }
+
+            var outcome = _sheets.LayoutPlanAndFront(plan, front, threeD, corner, left, right, bottom, top, layout.ViewCentreX);
+            if (!outcome.Fits)
+            {
+                progress.Log($"{plateName}: layout tight - short by {outcome.DeficitMm:0.#} mm");
             }
         }
 
