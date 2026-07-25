@@ -11,8 +11,8 @@ Revit add-in submitted for the SD Software technical test. It adds a **SD Softwa
 
 | Tool | Video |
 |---|---|
-| Bearing Plate | _(link)_ |
-| Adjust Beam | _(link)_ |
+| Bearing Plate | [Watch](https://drive.google.com/file/d/1UzkzRZcTGNROykr9CsYVCgxPl268cqEo/view?usp=sharing) |
+| Adjust Beam | [Watch](https://drive.google.com/file/d/1GlS6VGJuOTD3kw2ZeXnf6yElfT_6Yr53/view?usp=sharing) |
 
 ## Requirements
 
