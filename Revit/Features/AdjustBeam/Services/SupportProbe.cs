@@ -319,6 +319,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 TopAboveBeamMm = height.Top,
                 BottomAboveBeamMm = height.Bottom,
                 ThicknessMm = neighbour is Wall wall ? wall.Width.FeetToMm() : 0,
+                Collinear = kind == SupportKind.InlineBeam && Collinear(beam, neighbour),
             };
 
             if (isColumn)
@@ -478,10 +479,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 return SupportKind.CrossingBeam;
             }
 
-            var angle = AngleBetween(beam.Direction, otherAxis.Direction);
-            var offset = DistanceFromAxis(beam.AxisStart, beam.Direction, otherAxis.GetEndPoint(0));
-
-            if (angle <= InlineAngleDegrees && offset.FeetToMm() <= InlineOffsetMm)
+            if (Collinear(beam, otherAxis))
             {
                 return SupportKind.InlineBeam;
             }
@@ -489,6 +487,24 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return FaceToFace(beam, end, neighbour, otherAxis, origin, outward)
                 ? SupportKind.InlineBeam
                 : SupportKind.CrossingBeam;
+        }
+
+        /// <summary>
+        /// Whether the other beam runs on the same line as this one, meeting it end to end rather than
+        /// crossing it. Nearly the same direction and barely any sideways offset - the two are one beam
+        /// broken over the column between them.
+        /// </summary>
+        private static bool Collinear(BeamGeometry beam, Element neighbour)
+        {
+            var otherAxis = neighbour.GetLocationLine();
+            return otherAxis != null && Collinear(beam, otherAxis);
+        }
+
+        private static bool Collinear(BeamGeometry beam, Line otherAxis)
+        {
+            var angle = AngleBetween(beam.Direction, otherAxis.Direction);
+            var offset = DistanceFromAxis(beam.AxisStart, beam.Direction, otherAxis.GetEndPoint(0));
+            return angle <= InlineAngleDegrees && offset.FeetToMm() <= InlineOffsetMm;
         }
 
         /// <summary>

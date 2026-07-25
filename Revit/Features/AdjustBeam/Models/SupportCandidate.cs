@@ -93,6 +93,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         /// <summary>How much of the support the beam passes through, from where it starts to where it ends.</summary>
         public double SpanMm => FarMm - NearMm;
 
+        /// <summary>
+        /// Set on an inline partner that runs on the same line as this beam, meeting it end to end.
+        /// Two such beams are contiguous - they touch over the column they share - so nothing can stand
+        /// between them, and the test for something in the way, which is there for beams that face each
+        /// other across a gap, does not apply. A beam merely crossing at the shared column is part of
+        /// the joint, not an obstruction; read as one it breaks a pair that plainly belongs together.
+        /// </summary>
+        public bool Collinear { get; set; }
+
         /// <summary>Family and type, for the report.</summary>
         public string Description { get; set; }
 

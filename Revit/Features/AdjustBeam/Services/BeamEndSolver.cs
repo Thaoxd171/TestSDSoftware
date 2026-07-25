@@ -714,10 +714,32 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                     support => support.Kind == SupportKind.InlineBeam && support.Id == forcedPartnerId);
             }
 
-            var inline = Nearest(supports, SupportKind.InlineBeam);
+            // Only one beam can be the partner, so the choice between two facing this end matters.
+            // A beam on the same line as this one wins it: two beams broken over the column between
+            // them are as plain a pair as the design ever states, where one arriving at an angle is
+            // only inferred from where it happens to point.
+            //
+            // Nearness cannot settle it, because the beams most in need of parting are the ones that
+            // have run into each other, and a beam this end is already buried in reads as nearer than
+            // one resting exactly against it. 1856006 met its own continuation 1856062 at nought and a
+            // beam crossing the joint at minus five hundred, and picked the crossing beam.
+            var inline = supports
+                .Where(support => support.Kind == SupportKind.InlineBeam)
+                .OrderBy(support => support.Collinear ? 0 : 1)
+                .ThenBy(support => support.NearMm)
+                .FirstOrDefault();
+
             if (inline == null)
             {
                 return null;
+            }
+
+            // Two beams on one line meet end to end over the column between them; nothing can stand in
+            // that gap, so the test below - which is for beams that face each other across open space -
+            // is not asked.
+            if (inline.Collinear)
+            {
+                return inline;
             }
 
             // Only something standing in front counts as being in the way. A beam this end already
@@ -728,14 +750,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 .Any(support => support.NearMm < inline.NearMm - ContactToleranceMm);
 
             return between ? null : inline;
-        }
-
-        private static SupportCandidate Nearest(IReadOnlyList<SupportCandidate> supports, SupportKind kind)
-        {
-            return supports
-                .Where(support => support.Kind == kind)
-                .OrderBy(support => support.NearMm)
-                .FirstOrDefault();
         }
 
         /// <summary>
