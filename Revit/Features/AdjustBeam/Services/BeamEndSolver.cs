@@ -76,6 +76,12 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// left out, which is right for any section centred on its line and wrong for a precast one
         /// that is not: the cut has to sweep past the material that is actually there.
         /// </param>
+        /// <param name="forcedPartnerId">
+        /// The beam this end was found to part from, read off the model before anything moved. Whether
+        /// two beams are a pair is a fact about the design, not about where the run has pushed them to
+        /// this moment; measured afresh each sweep it flickers as the partner comes and goes, and the
+        /// end never settles. Nought when the end parts from nothing.
+        /// </param>
         public static BeamEndPlan Solve(
             long beamId,
             int end,
@@ -85,7 +91,8 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             double beamWidthMm,
             double axisOffsetMm = 0,
             double acrossLeastMm = 0,
-            double acrossMostMm = 0)
+            double acrossMostMm = 0,
+            long forcedPartnerId = 0)
         {
             if (acrossMostMm <= acrossLeastMm)
             {
@@ -95,7 +102,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
             var plan = new BeamEndPlan { BeamId = beamId, End = end };
 
-            var limits = Weigh(supports, options, beamWidthMm);
+            var limits = Weigh(supports, options, beamWidthMm, forcedPartnerId);
             var decision = limits.FirstOrDefault(limit => limit.Governs);
             if (decision == null)
             {
@@ -371,9 +378,10 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         public static IReadOnlyList<BeamEndLimit> Weigh(
             IReadOnlyList<SupportCandidate> supports,
             AdjustBeamOptions options,
-            double beamWidthMm)
+            double beamWidthMm,
+            long forcedPartnerId = 0)
         {
-            var found = Collect(supports, options, beamWidthMm).ToList();
+            var found = Collect(supports, options, beamWidthMm, forcedPartnerId).ToList();
             var governing = found.FirstOrDefault(limit => limit.Settles) ?? Nearest(found);
 
             foreach (var limit in found)
@@ -441,12 +449,13 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         private static IList<BeamEndLimit> Collect(
             IReadOnlyList<SupportCandidate> supports,
             AdjustBeamOptions options,
-            double beamWidthMm)
+            double beamWidthMm,
+            long forcedPartnerId)
         {
             var pillar = Bearing(supports);
             var limits = new List<BeamEndLimit>();
 
-            var inline = FacingPartner(supports);
+            var inline = FacingPartner(supports, forcedPartnerId);
             if (inline != null)
             {
                 // Half the gap away from the point the two beams share. The pillar sets the parting
@@ -687,9 +696,24 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// they are then no more a pair than any two strangers either side of a crowd. So the partner
         /// also has to be the first thing this end meets: anything nearer is what the end is actually
         /// stopping against, and the beam beyond it is somebody else's business.
+        ///
+        /// That last test cannot be trusted once the run is under way. Whether the crossing beam stands
+        /// in front of the partner is read from where the partner sits, and as the run places it the
+        /// partner retreats to the parting plane, so a crossing beam that was behind it comes to be in
+        /// front and the pair breaks. Which two beams part is a fact about the design, settled before
+        /// anything moved: when it has been, the caller names the partner and the test is not asked
+        /// again.
         /// </summary>
-        private static SupportCandidate FacingPartner(IReadOnlyList<SupportCandidate> supports)
+        private static SupportCandidate FacingPartner(
+            IReadOnlyList<SupportCandidate> supports,
+            long forcedPartnerId)
         {
+            if (forcedPartnerId != 0)
+            {
+                return supports.FirstOrDefault(
+                    support => support.Kind == SupportKind.InlineBeam && support.Id == forcedPartnerId);
+            }
+
             var inline = Nearest(supports, SupportKind.InlineBeam);
             if (inline == null)
             {

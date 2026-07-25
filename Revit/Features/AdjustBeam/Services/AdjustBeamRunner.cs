@@ -53,6 +53,14 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>Where each beam's axis was left by the sweep before, to tell a sweep that changed nothing.</summary>
         private readonly Dictionary<long, XYZ[]> _where = new Dictionary<long, XYZ[]>();
 
+        /// <summary>
+        /// The beam each end was found to part from, read off the model before anything moved. Which
+        /// two beams pair up is fixed by the design; measured afresh each sweep it flickers as the
+        /// partner is nudged into place, so it is settled once here and then held.
+        /// </summary>
+        private readonly Dictionary<(long Beam, int End), long> _partners =
+            new Dictionary<(long, int), long>();
+
         public AdjustBeamRunner(Document document)
         {
             _document = document;
@@ -74,6 +82,7 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                 transaction.Start();
 
                 var starts = Capture(beams, result, progress);
+                DetectPartners(starts, options);
 
                 for (var sweep = 1; sweep <= MaximumSweeps && !progress.IsCancelled; sweep++)
                 {
@@ -283,23 +292,67 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return plan;
         }
 
-        private static IList<BeamEndPlan> Decide(
+        private IList<BeamEndPlan> Decide(
             BeamGeometry geometry,
             SupportProbe probe,
             AdjustBeamOptions options)
         {
+            var id = geometry.Beam.Id.ToLong();
             return BeamGeometry.Ends
-                .Select(end => BeamEndSolver.Solve(
-                    geometry.Beam.Id.ToLong(),
-                    end,
-                    probe.Probe(geometry, end),
-                    options,
-                    geometry.LengthMm,
-                    geometry.WidthMm,
-                    geometry.AxisOffsetMm(end),
-                    geometry.AcrossAt(end).Least,
-                    geometry.AcrossAt(end).Most))
+                .Select(end => SolveEnd(
+                    geometry, probe, options, end,
+                    _partners.TryGetValue((id, end), out var partner) ? partner : 0))
                 .ToList();
+        }
+
+        private static BeamEndPlan SolveEnd(
+            BeamGeometry geometry,
+            SupportProbe probe,
+            AdjustBeamOptions options,
+            int end,
+            long forcedPartnerId)
+        {
+            return BeamEndSolver.Solve(
+                geometry.Beam.Id.ToLong(),
+                end,
+                probe.Probe(geometry, end),
+                options,
+                geometry.LengthMm,
+                geometry.WidthMm,
+                geometry.AxisOffsetMm(end),
+                geometry.AcrossAt(end).Least,
+                geometry.AcrossAt(end).Most,
+                forcedPartnerId);
+        }
+
+        /// <summary>
+        /// Reads off which beams part from which, before anything has been touched. A parting is an
+        /// agreement between two ends about a plane they share, and which end gives way was fixed when
+        /// the model was drawn; recognising it depends on the two beams still sitting where they were
+        /// drawn, which they are only at the outset. Held from here on, so that a beam nudged into place
+        /// mid-run cannot make its partner forget the two are a pair.
+        /// </summary>
+        private void DetectPartners(IList<BeamStart> starts, AdjustBeamOptions options)
+        {
+            var probe = new SupportProbe(_document);
+
+            foreach (var start in starts)
+            {
+                var geometry = BeamGeometry.Create(start.Beam);
+                if (geometry == null)
+                {
+                    continue;
+                }
+
+                foreach (var end in BeamGeometry.Ends)
+                {
+                    var plan = SolveEnd(geometry, probe, options, end, 0);
+                    if (!plan.IsSkipped && plan.Support == SupportKind.InlineBeam)
+                    {
+                        _partners[(geometry.Beam.Id.ToLong(), end)] = plan.SupportId;
+                    }
+                }
+            }
         }
 
         /// <summary>Takes off whatever the model already had at the ends about to be worked on.</summary>

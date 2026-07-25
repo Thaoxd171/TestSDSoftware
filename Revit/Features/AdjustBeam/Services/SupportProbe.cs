@@ -102,6 +102,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
         /// <summary>How far a face has to reach into the width the beam sweeps to be in front of it.</summary>
         private const double InsideToleranceMm = 1;
 
+        /// <summary>How far above a bearing block a face has to reach to count as standing over it.</summary>
+        private const double BlockToleranceMm = 1;
+
         private static readonly IList<BuiltInCategory> SupportCategories = new List<BuiltInCategory>
         {
             BuiltInCategory.OST_Walls,
@@ -338,7 +341,9 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             var swept = Swept(solids, beam, neighbour, kind, origin, outward);
             candidate.ClearMm = swept.Count == 0 ? (double?)null : swept.Min().FeetToMm();
 
-            var upright = UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ);
+            var upright = AboveTheBlock(
+                UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ), neighbour, kind);
+
             var entryFace = EntryFace(upright, origin, outward, beam.WidthMm);
 
             // A wall the beam meets at the corner where it ends shows the end nothing but its flank,
@@ -510,7 +515,10 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             // face each other - the one it is leaning on carries straight past, and there is no shared
             // point between them to divide.
             var entry = EntryNormal(
-                UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ),
+                AboveTheBlock(
+                    UprightFaces(neighbour.GetSolids(), beam.BottomZ, beam.TopZ),
+                    neighbour,
+                    SupportKind.CrossingBeam),
                 origin,
                 outward,
                 beam.WidthMm);
@@ -751,6 +759,56 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
                    + $"{where}, {height}, {measure.Wide.FeetToMm():0.#} wide across, "
                    + $"{measure.Inside.FeetToMm():0.#} of it inside the {widthMm:0.#} the beam sweeps, "
                    + $"area {face.Area.FeetToMm().FeetToMm():0} mm2";
+        }
+
+        /// <summary>
+        /// The faces of a neighbouring beam that stand above its bearing block.
+        ///
+        /// The block is the widened foot a precast beam lands on, and it is not what an end arrives at:
+        /// it is cut back to let the other beam through, which is why the material of it was left out
+        /// of the swept measurement in the first place. Its faces were not, and they are the nearest
+        /// thing in front of an end often enough to win.
+        ///
+        /// Two of them decided 1856700. At END 0 the face chosen was 130 mm wide and 300 tall, sitting
+        /// wholly below the web - the end of the neighbour's block, where its real end face is 372 wide
+        /// and the full depth - and the parting the two beams share came out 261 mm adrift, because the
+        /// column's centre had been projected onto the wrong plane. At END 1 it was the ten millimetre
+        /// step between block and web, which runs the whole length of a beam and so is far too wide to
+        /// be dropped for being a sliver.
+        ///
+        /// Only a beam is treated this way. A corbel pillar stands entirely below the beam by design,
+        /// and the wall at 1856700 END 1 stops at the top of the block; judged by this they would both
+        /// vanish.
+        /// </summary>
+        private static IList<PlanarFace> AboveTheBlock(
+            IList<PlanarFace> faces,
+            Element neighbour,
+            SupportKind kind)
+        {
+            if (kind != SupportKind.CrossingBeam && kind != SupportKind.InlineBeam)
+            {
+                return faces;
+            }
+
+            var block = BeamSection.Read(neighbour)?.BlockTopZ;
+            if (block == null)
+            {
+                return faces;
+            }
+
+            var line = block.Value + BlockToleranceMm.MmToFeet();
+
+            var kept = faces
+                .Where(face =>
+                {
+                    var range = face.ZRange();
+                    return range == null || range.Value.Top > line;
+                })
+                .ToList();
+
+            // A beam that is all block and no web has nothing else to offer, and no face at all is
+            // worse than a low one.
+            return kept.Count == 0 ? faces : kept;
         }
 
         private static IList<PlanarFace> UprightFaces(IEnumerable<Solid> solids)

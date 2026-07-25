@@ -42,6 +42,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
 
         public double MiddleZ => (TopZ + BottomZ) / 2;
 
+        /// <summary>
+        /// How high the bearing block reaches. Null on a section that has none.
+        ///
+        /// It is the line above which the beam is only as wide as its web, and so the line above which
+        /// a face of it is a face another beam has to reckon with. Everything below is block, and a
+        /// block is cut back rather than stood clear of.
+        /// </summary>
+        public double? BlockTopZ { get; private set; }
+
         /// <summary>Null when the element has no straight location line or no readable geometry.</summary>
         public static BeamSection Read(Element beam)
         {
@@ -80,7 +89,15 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             };
 
             section.ReadFlanks();
+            section.BlockTopZ = section.HighestBeyondWeb(vertices);
             return section;
+        }
+
+        /// <summary>Top of whatever material stands outside the web, which is the block.</summary>
+        private double? HighestBeyondWeb(IEnumerable<XYZ> vertices)
+        {
+            var heights = vertices.Where(IsBeyondWeb).Select(point => point.Z).ToList();
+            return heights.Count == 0 ? (double?)null : heights.Max();
         }
 
         public double Along(XYZ point) => (point - _origin).DotProduct(_direction);
