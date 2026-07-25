@@ -106,14 +106,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Models
         public string Description { get; set; }
 
         /// <summary>
-        /// The face the skew was read off, written out for the report: which way it looks, where it
-        /// crosses the axis and how high it stands. A skew is only ever as good as the face it came
-        /// from, and nothing else in the report says which face that was.
-        /// Temporary: remove with the diagnostic commands before the final submission.
-        /// </summary>
-        public string EntryNote { get; set; }
-
-        /// <summary>
         /// Why the probe threw this one away, or null when it counts. The solver never sees a rejected
         /// candidate; the field exists so the Explain command can show what was discarded and why.
         /// </summary>

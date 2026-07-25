@@ -363,7 +363,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             candidate.EntryFaceMm = entryFace == null
                 ? (double?)null
                 : Crossing(entryFace, origin, outward)?.FeetToMm();
-            candidate.EntryNote = DescribeEntry(entryFace, origin, outward, beam.WidthMm);
 
             // The ray is one line down the middle of the beam, and a support the end merely slips past
             // the corner of is not on it. Worse, an end running out square to its neighbour travels
@@ -625,7 +624,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             // The face the beam runs into, already turned to point the way the beam is travelling.
             var entryFace = EntryFace(faces, origin, outward, widthMm);
             var normal = entryFace == null ? null : -entryFace.FaceNormal;
-            candidate.EntryNote = DescribeEntry(entryFace, origin, outward, widthMm);
             if (normal == null)
             {
                 candidate.RejectionReason = "no face of the pillar looks back at this end";
@@ -743,38 +741,6 @@ namespace SDSoftware.RevitTest.Features.AdjustBeam.Services
             return least > most
                 ? (0, 0)
                 : (most - least, Math.Max(0, Math.Min(most, half) - Math.Max(least, -half)));
-        }
-
-        /// <summary>
-        /// Where the face the skew was read off actually is, in words.
-        /// Temporary: remove with the diagnostic commands before the final submission.
-        /// </summary>
-        private static string DescribeEntry(PlanarFace face, XYZ origin, XYZ outward, double widthMm)
-        {
-            if (face == null)
-            {
-                return "no face of it looks back at this end";
-            }
-
-            var normal = face.FaceNormal;
-            var crossing = Crossing(face, origin, outward);
-            var range = face.ZRange();
-
-            var height = range == null
-                ? "height unknown"
-                : $"z {range.Value.Bottom.FeetToMm():0.#} to {range.Value.Top.FeetToMm():0.#}";
-
-            var where = crossing == null ? "never crosses" : $"crosses at {crossing.Value.FeetToMm():0.#}";
-
-            var across = XYZ.BasisZ.CrossProduct(outward);
-            var measure = across.IsZeroLength()
-                ? (Wide: 0d, Inside: 0d)
-                : AcrossBeam(face, origin, across.Normalize(), (widthMm / 2).MmToFeet());
-
-            return $"off face ({normal.X:0.###}, {normal.Y:0.###}, {normal.Z:0.###}), "
-                   + $"{where}, {height}, {measure.Wide.FeetToMm():0.#} wide across, "
-                   + $"{measure.Inside.FeetToMm():0.#} of it inside the {widthMm:0.#} the beam sweeps, "
-                   + $"area {face.Area.FeetToMm().FeetToMm():0} mm2";
         }
 
         /// <summary>
